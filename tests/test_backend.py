@@ -611,3 +611,77 @@ def test_dictation_chunks_are_stitched_into_sentences():
     assert " ".join(out) == "So the thing is we need to finish this. I agree."
     # a mid-clause (not final) chunk never loses its full stop early
     assert g.join_dictated_clause("We need to.", False, False) == ("We need to.", False)
+
+
+# ---------------------------------------------------------------------------
+# Whole-sentence grammar suggestions (sentence_fixer.py)
+# ---------------------------------------------------------------------------
+from sentence_fixer import SentenceFixer, is_safe_rewrite, split_into_chunks
+
+
+def test_safe_rewrite_guard_rejects_changed_meaning_and_lost_literals():
+    src = "I want to the shop go tomorrow and buy some milk."
+    assert is_safe_rewrite(src, "I want to go to the shop tomorrow and buy some milk.")
+    # a different sentence
+    assert not is_safe_rewrite(src, "Toward the End of Time takes place at the museum.")
+    # lost a file name / e-mail / number / name
+    lit = "Please review main.dart and email bob@example.com before 3.5 hours with Gungeon."
+    assert not is_safe_rewrite(lit, "Please review main text and email me before 3.5 hours with Gungeon.")
+    assert not is_safe_rewrite(lit, "Please review main.dart and email bob@example.com before 3.5 hours with it.")
+    # padded or truncated
+    assert not is_safe_rewrite("We go.", "We go to the big shop every single day of the week.")
+
+
+def test_chunks_keep_lines_and_list_markers():
+    text = "Shopping list\n- two egg\n\n1. the milk buy"
+    chunks = split_into_chunks(text)
+    assert "".join(p + b for p, b in chunks) == text
+    assert [b for _, b in chunks if b] == ["Shopping list", "two egg", "the milk buy"]
+
+
+def test_sentence_fixer_applies_only_safe_chunks_and_keeps_layout():
+    def fake_model(batch):
+        fixes = {
+            "two egg": "two eggs",
+            "the milk buy": "buy the milk",
+            "Shopping list": "A completely unrelated sentence about museums in Vancouver",
+        }
+        return [fixes.get(b, b) for b in batch]
+
+    fixer = SentenceFixer(batch_fn=fake_model)
+    out = fixer.rewrite("Shopping list\n- two egg\n\n1. the milk buy")
+    assert out == "Shopping list\n- two eggs\n\n1. buy the milk"
+    assert fixer.rewrite("- two eggs") is None  # nothing to change
+
+    # suggest() never blocks: first call returns None, later calls the answer
+    import time as _t
+    assert fixer.suggest("- two egg") is None
+    for _ in range(50):
+        if fixer.suggest("- two egg"):
+            break
+        _t.sleep(0.02)
+    assert fixer.suggest("- two egg") == "- two eggs"
+
+
+def test_status_offers_model_rewrite_as_first_variant():
+    eng = vtt_engine.engine
+    old = eng.sentence_fixer
+    eng.sentence_fixer = SentenceFixer(batch_fn=lambda b: [x.replace("two cat", "two cats") for x in b])
+    try:
+        eng.is_listening = False
+        eng.polished_live_text = "I have two cat."
+        import time as _t
+        variants = []
+        for _ in range(50):
+            variants = vtt_engine.get_status()["grammarly_report"]["sentence_variants"]
+            if variants and variants[0]["label"] == "GRAMMAR":
+                break
+            _t.sleep(0.02)
+        assert variants[0] == {
+            "label": "GRAMMAR",
+            "description": variants[0]["description"],
+            "text": "I have two cats.",
+        }
+    finally:
+        eng.sentence_fixer = old
+        eng.polished_live_text = ""

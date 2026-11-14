@@ -24,3 +24,6 @@ Thumbs.db
 
 # Local user settings (personal dictionary, Live Clean preference)
 backend/user_settings.json
+
+# Local grammar model files (downloaded, not source)
+backend/models/

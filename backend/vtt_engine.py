@@ -64,6 +64,7 @@ import uvicorn
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dyslexia_grammar import LocalDyslexiaGrammarEngine, compute_in_place_edit
 from live_cleaner import LiveCleaner
+from sentence_fixer import SentenceFixer
 from typo_fixer import SmartTypoFixer
 from win32_typer import (
     apply_in_place_screen_edit,
@@ -276,6 +277,11 @@ class EngineState:
         self.running = True
         window_tracker.on_hotkey_f8 = self.toggle_listening_state
         # Live Clean: fixes typos in any app as each word is finished.
+        # Whole-sentence grammar suggestions (word order, plurals, run-ons) from a
+        # small local model. Suggest-only; absent model folder = feature off.
+        self.sentence_fixer = (
+            SentenceFixer(model_dir="") if TEST_MODE else SentenceFixer()
+        )
         self.live_cleaner = LiveCleaner(
             clean_fn=lambda region: self.grammar.process_text(region, source="live"),
             on_fix=lambda fixes: self.record_fixes(fixes, verb="Cleaned"),
@@ -896,6 +902,28 @@ def get_status(ui: int = 0, last_edit_id: int = 0) -> Dict[str, Any]:
         engine._report_cache_key = cache_key
     grammarly_report = engine._report_cache
 
+    # Offer the model's whole-sentence correction as the first one-click rewrite.
+    # Skipped while dictating (the text changes constantly and the GPU is busy).
+    if (
+        not engine.is_listening
+        and engine.polished_live_text
+        and engine.grammar.rules_enabled.get("sentence_model", True)
+    ):
+        rewrite = engine.sentence_fixer.suggest(engine.polished_live_text)
+        if rewrite and rewrite != engine.polished_live_text:
+            grammarly_report = dict(grammarly_report)
+            grammarly_report["sentence_variants"] = [
+                {
+                    "label": "GRAMMAR",
+                    "description": "Whole-sentence fix (word order, plurals, tenses, sentence breaks)",
+                    "text": rewrite,
+                }
+            ] + [
+                v
+                for v in grammarly_report.get("sentence_variants", [])
+                if v.get("label") != "GRAMMAR"
+            ][:1]
+
     # One-shot reactions ("fixing", "happy"...) fall back to idle on their own.
     if (
         not engine.is_listening
@@ -940,6 +968,7 @@ def get_status(ui: int = 0, last_edit_id: int = 0) -> Dict[str, Any]:
         "rules": engine.grammar.rules_enabled,
         "live_clean": engine.live_cleaner.enabled,
         "smart_typos_available": engine.grammar.typo_fixer.available,
+        "sentence_model_available": engine.sentence_fixer.available,
         "fix_event_id": engine.fix_event_id,
         "latest_fix": engine.latest_fix,
         "latest_edit_id": latest_id,

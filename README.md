@@ -54,7 +54,12 @@ Runs 100% locally in `< 1 ms` with zero cloud calls and zero extra VRAM:
   - `⚡ LIVE CLEAN` (off by default, remembered once switched on) does the same in *any* app: a keyboard listener keeps the last few words in memory only and fixes a word when you press space or punctuation. **Backspace right after a fix undoes it** and stops that word being changed again. It never fires on Enter/Tab, and skips code editors, terminals and password managers.
 - Each fix pops a `✔ teh → the` toast over the creature and the corrected word flashes green in the live preview.
 
-### 4. Atomic Point-A to Point-B External Window Typing (`windows/runner/flutter_window.cpp`)
+### 4. Whole-Sentence Grammar Suggestions (`backend/sentence_fixer.py`, optional)
+- A small local T5 grammar model (run through CTranslate2, about 0.2 s per text on a GTX 1660 Ti) proposes fixes the rules cannot make: word order, plurals, tenses and where a run-on sentence should break.
+- **Suggest-only**: it appears as the `✨ GRAMMAR` one-click rewrite with a preview. Rewrites that drop a name, number, link or file name, or that change too many words, are discarded.
+- One-time setup (downloads ~890 MB, keeps ~230 MB; model licence CC BY-NC-SA 4.0, non-commercial): `python scripts/setup_grammar_model.py`. Without it everything else works as before.
+
+### 5. Atomic Point-A to Point-B External Window Typing (`windows/runner/flutter_window.cpp`)
 - **Zero Focus Stealing (`WS_EX_NOACTIVATE`)**: Clicking the creature or HUD buttons never steals keyboard focus from Notepad, Word, VS Code, or your browser.
 - **WinUI 3 / Notepad Safe Atomic Sync (`TypeInPlace`)**: Uses mathematical edit coalescing in Python + native C++ `VK_BACK` mini-batches + `CF_UNICODETEXT` Clipboard `Ctrl+V` synchronization so what you see in the yellow live preview is transferred identically to your active page.
 
@@ -63,7 +68,7 @@ Runs 100% locally in `< 1 ms` with zero cloud calls and zero extra VRAM:
 ## 🚀 Quick Start
 
 ```powershell
-# 1. Run backend unit tests (36 tests)
+# 1. Run backend unit tests (40 tests)
 pytest tests/test_backend.py -v
 
 # 2. Run Flutter static analysis & widget tests

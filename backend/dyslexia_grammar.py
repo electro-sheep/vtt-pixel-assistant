@@ -166,6 +166,7 @@ class LocalDyslexiaGrammarEngine:
             "grammar_structure": True,
             "auto_punctuation": True,
             "clarity_conciseness": True,
+            "sentence_model": True,
         }
         # Writing tone: "clear" (default), "formal" (expands contractions), "casual", "concise"
         self.writing_tone: str = "clear"
