@@ -42,16 +42,16 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
   static const MethodChannel _windowChannel =
       MethodChannel('vtt_assistant/window');
   static const String _backendBaseUrl = 'http://127.0.0.1:8765';
-  static const double _floorWidth = 396.0;
+  static const double _floorWidth = 412.0;
 
   final HttpClient _http = HttpClient()
     ..connectionTimeout = const Duration(milliseconds: 600);
   Process? _backendProcess;
 
   // Floor platform & creature position state (creature stands ON the floor box)
-  double _floorX = 320.0;
-  double _petX = 430.0;
-  double _petY = 210.0;
+  double _floorX = 310.0;
+  double _petX = 420.0;
+  double _petY = 190.0;
   bool _initializedPosition = false;
   double _pixelScale = 5.0;
   bool _roamingEnabled = true;
@@ -71,7 +71,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
   String _localTrickState = '';
   int _trickTicksRemaining = 0;
   bool _showContextMenu = false;
-  final bool _showSpeechBubble = true; // Controls Floor Platform visibility
+  final bool _showSpeechBubble = true;
   bool _isFloorExpanded = false; // Starts as a compact flat floor bar!
   bool _showScratchpad = false;
   bool _showCustomPathInput = false;
@@ -83,11 +83,12 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
   // Engine synchronized state
   bool _backendConnected = false;
   bool _modelLoading = false;
-  String _activeCreature = 'trex';
-  String _creatureName = 'Apex Green T-Rex';
-  int _creatureTier = 3;
-  String _creatureVram = '~2.0 GB VRAM';
-  String _modelName = 'large-v3-turbo';
+  String _activeCreature = 'cultist';
+  String _cultistSkin = 'cultist'; // 'cultist' (Ember) or 'cultist_lunar' (Lunatic Beak)
+  String _creatureName = 'Ember Cultist Scribe';
+  int _creatureTier = 2;
+  String _creatureVram = '~1.5 GB VRAM';
+  String _modelName = 'medium.en';
   String _computeBackend = 'CUDA GPU';
   String _targetWindow = 'Active Window';
   String _writingTone = 'clear';
@@ -99,7 +100,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
   String _polishedLiveText = '';
   List<Map<String, String>> _recentFixes = [];
   int _writingScore = 100;
-  String _detectedTone = 'Neutral & Clear';
+  String _detectedTone = 'Direct & Clear';
   Map<String, int> _pillarScores = {
     'correctness': 100,
     'clarity': 100,
@@ -107,6 +108,10 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     'delivery': 100,
   };
   List<Map<String, String>> _grammarlyRecommendations = [];
+  List<Map<String, dynamic>> _wordExplorations = [];
+  List<Map<String, String>> _sentenceVariants = [];
+  int _selectedWordIndex = -1;
+
   String _statusMessage = 'Click creature to start transcribing (or press F8).';
   String _engineAnimState = 'idle';
   Map<String, bool> _grammarRules = {
@@ -129,7 +134,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     _setupWindowChannel();
     _ensureBackendStarted();
 
-    // 55ms high-fluidity active animation & AI behavior loop
+    // 55ms high-fluidity active game animation & AI behavior loop
     _animTimer = Timer.periodic(const Duration(milliseconds: 55), (_) {
       _onAnimationTick();
     });
@@ -285,7 +290,12 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
         setState(() {
           _backendConnected = true;
           _modelLoading = (data['model_loading'] as bool?) ?? false;
-          _activeCreature = (data['creature'] as String?) ?? _activeCreature;
+          final String serverCreature =
+              (data['creature'] as String?) ?? _activeCreature;
+          _activeCreature = serverCreature;
+          if (serverCreature == 'cultist' || serverCreature == 'cultist_lunar') {
+            _cultistSkin = serverCreature;
+          }
           _creatureName = (data['creature_name'] as String?) ?? _creatureName;
           _creatureTier =
               (data['creature_tier'] as num?)?.toInt() ?? _creatureTier;
@@ -303,8 +313,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
           _cursorY = (data['cursor_y'] as num?)?.toDouble() ?? _cursorY;
           _isListening = nowListening;
           if (!wasListening && nowListening) {
-            // Auto-expand the floor box when live transcription starts!
-            _isFloorExpanded = true;
+            _setFloorExpanded(true);
           }
           _audioLevel = (data['audio_level'] as num?)?.toDouble() ?? 0.0;
           _rawLiveText = (data['raw_live_text'] as String?) ?? '';
@@ -346,7 +355,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
             _writingScore =
                 (grammarlyReport['writing_score'] as num?)?.toInt() ?? 100;
             _detectedTone = (grammarlyReport['detected_tone'] as String?) ??
-                'Neutral & Clear';
+                'Direct & Clear';
             final Map<String, dynamic>? pScores =
                 grammarlyReport['pillar_scores'] as Map<String, dynamic>?;
             if (pScores != null) {
@@ -358,6 +367,21 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                 grammarlyReport['recommendations'] as List<dynamic>?;
             if (recs != null) {
               _grammarlyRecommendations = recs
+                  .map((item) => Map<String, String>.from(
+                      (item as Map).map((k, v) => MapEntry('$k', '$v'))))
+                  .toList();
+            }
+            final List<dynamic>? explorations =
+                grammarlyReport['word_explorations'] as List<dynamic>?;
+            if (explorations != null) {
+              _wordExplorations = explorations
+                  .map((item) => Map<String, dynamic>.from(item as Map))
+                  .toList();
+            }
+            final List<dynamic>? variants =
+                grammarlyReport['sentence_variants'] as List<dynamic>?;
+            if (variants != null) {
+              _sentenceVariants = variants
                   .map((item) => Map<String, String>.from(
                       (item as Map).map((k, v) => MapEntry('$k', '$v'))))
                   .toList();
@@ -419,7 +443,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     if (!_isFloorExpanded) {
       return 52.0; // Compact flat floor bar + 18px grass/stone top
     }
-    return 268.0; // Expanded live transcription + 3-tier bar + Grammarly helper drawer
+    return 295.0; // Expanded live transcription + interactive word explorer + Grammarly drawer
   }
 
   void _setFloorExpanded(bool expanded) {
@@ -514,7 +538,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
 
         if (_autonomousAction == 'walk') {
           // Creature walks back and forth ON TOP of its terrain floor box!
-          final double step = 1.75 * _walkDirection;
+          final double step = 1.85 * _walkDirection;
           _petX += step;
           _facingLeft = _walkDirection < 0;
 
@@ -564,13 +588,12 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
 
     if (_showContextMenu) {
       final Offset menuPos = _computeMenuPosition(petW, petH);
-      rects.add([menuPos.dx - 8, menuPos.dy - 8, 348.0, 510.0]);
+      rects.add([menuPos.dx - 8, menuPos.dy - 8, 348.0, 520.0]);
     }
 
     _windowChannel.invokeMethod('setInteractiveRects', rects);
   }
 
-  /// Floor box sits UNDERNEATH the creature's feet (`_petY + _petHeight - 8`)
   Offset _computeFloorPosition(double petH) {
     final double fy = _petY + petH - 8.0;
     return Offset(_floorX, fy);
@@ -588,8 +611,8 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
       mx = math.max(12.0, _floorX - 344);
     }
     double my = _petY - 120;
-    if (screen.height > 0 && my + 515 > screen.height) {
-      my = screen.height - 520;
+    if (screen.height > 0 && my + 520 > screen.height) {
+      my = screen.height - 525;
     }
     my = math.max(12.0, my);
     return Offset(mx, my);
@@ -609,7 +632,9 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
   }
 
   bool get _isCultistCreature =>
-      _activeCreature == 'cultist' || _activeCreature == 'monster';
+      _activeCreature == 'cultist' ||
+      _activeCreature == 'cultist_lunar' ||
+      _activeCreature == 'monster';
 
   bool get _isPteroCreature =>
       _activeCreature == 'ptero' || _activeCreature == 'stego';
@@ -617,8 +642,10 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
   Color _creatureAccentColor() {
     if (_activeCreature == 'trex') {
       return const Color(0xFF66BB6A); // Tier 3: Jurassic Emerald Green
+    } else if (_activeCreature == 'cultist_lunar') {
+      return const Color(0xFFFFF038); // Tier 2B: Lunatic Cultist Royal Gold
     } else if (_isCultistCreature) {
-      return const Color(0xFFCE93D8); // Tier 2: Cultist Arcane Amethyst
+      return const Color(0xFFFFB300); // Tier 2A: Gungeon Ember Gold
     } else if (_activeCreature == 'custom') {
       return const Color(0xFF4DD0E1);
     } else {
@@ -649,8 +676,11 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
         _creatureTier = 1;
         _creatureVram = '~0.5 GB VRAM';
         _modelName = 'small.en';
-      } else if (creatureKey == 'cultist') {
-        _creatureName = 'Hooded Cultist Scribe';
+      } else if (creatureKey == 'cultist' || creatureKey == 'cultist_lunar') {
+        _cultistSkin = creatureKey;
+        _creatureName = creatureKey == 'cultist_lunar'
+            ? 'Lunatic Beak Cultist'
+            : 'Ember Cultist Scribe';
         _creatureTier = 2;
         _creatureVram = '~1.5 GB VRAM';
         _modelName = 'medium.en';
@@ -664,6 +694,68 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     });
     _updateFocusAllowance();
     _postBackend('/switch_creature', {'creature': creatureKey});
+  }
+
+  void _toggleCultistSkin() {
+    final String nextSkin =
+        (_activeCreature == 'cultist_lunar') ? 'cultist' : 'cultist_lunar';
+    _switchCreatureTier(nextSkin);
+  }
+
+  void _applyWordChoice({
+    required int wordIndex,
+    required String originalWord,
+    required String replacement,
+  }) {
+    setState(() {
+      _localTrickState = 'fixing';
+      _trickTicksRemaining = 18;
+      if (_polishedLiveText.isNotEmpty) {
+        final List<String> toks = _polishedLiveText.split(' ');
+        if (wordIndex >= 0 && wordIndex < toks.length) {
+          if (replacement == '[DROP]') {
+            toks.removeAt(wordIndex);
+          } else {
+            final RegExp m =
+                RegExp(r"^([^A-Za-z']*)([A-Za-z']+)([^A-Za-z']*)$");
+            final RegExpMatch? match = m.firstMatch(toks[wordIndex]);
+            if (match != null) {
+              toks[wordIndex] =
+                  '${match.group(1)}$replacement${match.group(3)}';
+            } else {
+              toks[wordIndex] = replacement;
+            }
+          }
+          _polishedLiveText = toks.join(' ');
+        }
+      }
+      _writingScore = (_writingScore + 3).clamp(0, 100);
+    });
+    _windowChannel.invokeMethod('restoreExternalFocus');
+    _postBackend('/apply_recommendation', {
+      'original': originalWord,
+      'replacement': replacement,
+      'word_index': wordIndex,
+      'replace_all': false,
+    });
+  }
+
+  void _applyFullSentenceVariant(String newSentence) {
+    if (newSentence.isEmpty) return;
+    final String old = _polishedLiveText;
+    setState(() {
+      _localTrickState = 'fixing';
+      _trickTicksRemaining = 20;
+      _polishedLiveText = newSentence;
+      _writingScore = 100;
+    });
+    _windowChannel.invokeMethod('restoreExternalFocus');
+    _postBackend('/apply_recommendation', {
+      'original': old,
+      'replacement': newSentence,
+      'word_index': -1,
+      'replace_all': true,
+    });
   }
 
   void _applyGrammarlyRecommendation(Map<String, String> rec) {
@@ -768,7 +860,6 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                 onTap: () {
                   _idleTicksWithoutActivity = 0;
                   setState(() {
-                    // Clicking the creature expands the floor box to show live text!
                     _setFloorExpanded(true);
                   });
                   _syncInteractiveRects();
@@ -829,19 +920,15 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     );
   }
 
-  /// Builds the Under-Creature Living Floor Platform:
-  /// - Top edge: 18px PixelTerrainFloorWidget (Lush grass/ferns for Dinosaurs, Cobblestones/candles for Cultist)
-  /// - Compact Flat Mode (`!_isFloorExpanded`): Thin 1-line bar ("Click creature to start transcribing")
-  /// - Expanded Mode (`_isFloorExpanded`): 3-Tier Progression Selector + Live Text + Grammarly 4-Pillar Helper
   Widget _buildTerrainFloorPlatform(Color accent) {
     final Color borderCol = _isListening
         ? const Color(0xFF00E676)
         : (_isCultistCreature
-            ? const Color(0xFF9C27B0)
+            ? const Color(0xFFFFD54F)
             : const Color(0xFF43A047));
     final Color groundBg = _isCultistCreature
-        ? const Color(0xF5130D1C)
-        : const Color(0xF5111814);
+        ? const Color(0xF6110B1A)
+        : const Color(0xF60F1712);
 
     return SizedBox(
       width: _floorWidth,
@@ -858,7 +945,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
             height: 18.0,
           ),
 
-          // 2. Compact Flat Bar OR Expanded Live Dictation & Grammarly Sanctuary
+          // 2. Compact Flat Bar OR Expanded Live Dictation & Word-Choice Sanctuary
           if (!_isFloorExpanded)
             GestureDetector(
               behavior: HitTestBehavior.opaque,
@@ -969,6 +1056,24 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     final Map<String, String>? latestFix =
         _recentFixes.isNotEmpty ? _recentFixes.last : null;
 
+    // Pick active word exploration (either user-selected word index or first word with alternatives)
+    Map<String, dynamic>? activeWordExp;
+    if (_wordExplorations.isNotEmpty) {
+      if (_selectedWordIndex >= 0 &&
+          _selectedWordIndex < _wordExplorations.length) {
+        final cand = _wordExplorations[_selectedWordIndex];
+        if ((cand['alternatives'] as List?)?.isNotEmpty ?? false) {
+          activeWordExp = cand;
+        }
+      }
+      activeWordExp ??= _wordExplorations.cast<Map<String, dynamic>?>().firstWhere(
+            (w) =>
+                w != null &&
+                ((w['alternatives'] as List?)?.isNotEmpty ?? false),
+            orElse: () => null,
+          );
+    }
+
     return Container(
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
@@ -986,7 +1091,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          // A. 3-Tier Creature & Whisper Progression Selector + Collapse Button
+          // A. 3-Tier Creature & Whisper Progression Selector + Cultist Skin Toggle + Collapse
           Row(
             children: [
               Expanded(
@@ -1004,10 +1109,12 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                     _tierPillButton(
                       tierNumber: 2,
                       title: 'CULTIST',
-                      subtitle: 'Scribe 1.5G',
-                      creatureKey: 'cultist',
+                      subtitle: _activeCreature == 'cultist_lunar'
+                          ? 'Lunar 1.5G'
+                          : 'Ember 1.5G',
+                      creatureKey: _cultistSkin,
                       selected: _isCultistCreature,
-                      color: const Color(0xFFCE93D8),
+                      color: const Color(0xFFFFD54F),
                     ),
                     const SizedBox(width: 4),
                     _tierPillButton(
@@ -1021,6 +1128,18 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                   ],
                 ),
               ),
+              if (_isCultistCreature) ...[
+                const SizedBox(width: 4),
+                _miniPixelButton(
+                  label: _activeCreature == 'cultist_lunar' ? 'ROBE: BLUE' : 'ROBE: RED',
+                  color: _activeCreature == 'cultist_lunar'
+                      ? const Color(0xFF42A5F5)
+                      : const Color(0xFFFF7043),
+                  tooltip:
+                      'Swap Cultist outfit between Gungeon Ember Robe and Terraria Lunatic Beak Mask!',
+                  onTap: _toggleCultistSkin,
+                ),
+              ],
               const SizedBox(width: 4),
               _miniPixelButton(
                 label: '▲ FLAT',
@@ -1139,7 +1258,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
 
           const SizedBox(height: 5),
 
-          // D. Live Dictation Stream Box (Raw -> Auto-Corrected Yellow Text)
+          // D. Interactive Live Dictation Stream Box (Click ANY word to see alternatives!)
           Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
@@ -1153,12 +1272,12 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                 Expanded(
                   child: _polishedLiveText.isEmpty
                       ? const Text(
-                          'Click the creature above (or ● REC) and speak — live words appear here and stream directly into your page!',
+                          'Click your companion above (or ● REC) and speak — words appear live here and you can click any word to swap synonyms or sound-alikes!',
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: Color(0xFF78909C),
-                            fontSize: 10.0,
+                            fontSize: 9.5,
                           ),
                         )
                       : Column(
@@ -1173,21 +1292,11 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
                                   color: Color(0xFF90A4AE),
-                                  fontSize: 9.5,
+                                  fontSize: 9.0,
                                   decoration: TextDecoration.lineThrough,
                                 ),
                               ),
-                            Text(
-                              '"$_polishedLiveText"',
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Color(0xFFFFF59D),
-                                fontSize: 12.0,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 0.3,
-                              ),
-                            ),
+                            _buildInteractiveWordStream(),
                           ],
                         ),
                 ),
@@ -1211,13 +1320,13 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
 
           const SizedBox(height: 5),
 
-          // E. Grammarly 4-Pillar Score Bar + Interactive Helper Recommendation Cards
+          // E. Next-Gen Word Explorer, 1-Click Sentence Rewrites & Grammarly 4-Pillar Bar
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
             decoration: BoxDecoration(
-              color: const Color(0xFF191326),
-              border: Border.all(color: const Color(0xFF4A148C)),
+              color: const Color(0xFF181224),
+              border: Border.all(color: const Color(0xFF6A1B9A)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1227,7 +1336,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                     Text(
                       'GRAMMARLY SCORE: $_writingScore/100',
                       style: const TextStyle(
-                        color: Color(0xFFEA80FC),
+                        color: Color(0xFFFFEE18),
                         fontSize: 9.5,
                         fontWeight: FontWeight.bold,
                       ),
@@ -1239,41 +1348,102 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          color: Color(0xFFB39DDB),
+                          color: Color(0xFFCE93D8),
                           fontSize: 8.5,
                         ),
                       ),
                     ),
+                    // 1-Click Full Sentence Rewrite Variant Buttons
+                    for (final variant in _sentenceVariants.take(2))
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4),
+                        child: _miniPixelButton(
+                          label: '✨ ${variant['label']}',
+                          color: const Color(0xFF00E5FF),
+                          tooltip:
+                              '${variant['description']}: "${variant['text']}"',
+                          onTap: () =>
+                              _applyFullSentenceVariant(variant['text'] ?? ''),
+                        ),
+                      ),
                   ],
                 ),
-                if (_grammarlyRecommendations.isNotEmpty) ...[
+
+                // Interactive Word-Choice Alternatives ("Did you mean?" / Synonyms / Drop Hedge)
+                if (activeWordExp != null) ...[
                   const SizedBox(height: 4),
-                  ..._grammarlyRecommendations.take(2).map((rec) {
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 3),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              '✦ [${(rec['pillar'] ?? 'style').toUpperCase()}] "${rec['original']}" → "${rec['replacement']}" (${rec['reason']})',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Color(0xFFFFF59D),
-                                fontSize: 9.0,
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        Text(
+                          activeWordExp['kind'] == 'confusable'
+                              ? '🔍 SOUND-ALIKE "${activeWordExp['word']}": '
+                              : (activeWordExp['kind'] == 'hedging'
+                                  ? '✂ HEDGE "${activeWordExp['word']}": '
+                                  : '💡 SWAP "${activeWordExp['word']}": '),
+                          style: const TextStyle(
+                            color: Color(0xFF80D8FF),
+                            fontSize: 9.0,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        ...(activeWordExp['alternatives'] as List)
+                            .take(4)
+                            .map((dynamic altObj) {
+                          final String alt = '$altObj';
+                          final bool isDrop = alt == '[DROP]';
+                          return Padding(
+                            padding: const EdgeInsets.only(right: 4),
+                            child: _miniPixelButton(
+                              label: isDrop ? '✖ DROP WORD' : alt,
+                              color: isDrop
+                                  ? const Color(0xFFFF8A80)
+                                  : const Color(0xFF69F0AE),
+                              tooltip: isDrop
+                                  ? 'Remove "${activeWordExp!['word']}" from the sentence'
+                                  : 'Replace "${activeWordExp!['word']}" with "$alt" on page',
+                              onTap: () => _applyWordChoice(
+                                wordIndex:
+                                    (activeWordExp!['index'] as num?)?.toInt() ??
+                                        0,
+                                originalWord: '${activeWordExp['word']}',
+                                replacement: alt,
                               ),
                             ),
+                          );
+                        }),
+                      ],
+                    ),
+                  ),
+                ],
+
+                // Phrase-level Grammarly Recommendations or Recent Fix Badge
+                if (_grammarlyRecommendations.isNotEmpty) ...[
+                  const SizedBox(height: 3),
+                  ..._grammarlyRecommendations.take(1).map((rec) {
+                    return Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '✦ [${(rec['pillar'] ?? 'style').toUpperCase()}] "${rec['original']}" → "${rec['replacement']}" (${rec['reason']})',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Color(0xFFFFF59D),
+                              fontSize: 9.0,
+                            ),
                           ),
-                          const SizedBox(width: 4),
-                          _miniPixelButton(
-                            label: 'HELPER FIX',
-                            color: const Color(0xFF00E676),
-                            tooltip:
-                                'Let your helper replace this phrase on the page',
-                            onTap: () => _applyGrammarlyRecommendation(rec),
-                          ),
-                        ],
-                      ),
+                        ),
+                        const SizedBox(width: 4),
+                        _miniPixelButton(
+                          label: 'HELPER FIX',
+                          color: const Color(0xFF00E676),
+                          tooltip:
+                              'Let your helper replace this phrase on the page',
+                          onTap: () => _applyGrammarlyRecommendation(rec),
+                        ),
+                      ],
                     );
                   }),
                 ] else if (latestFix != null) ...[
@@ -1284,7 +1454,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       color: _fixCategoryColor(latestFix['category']),
-                      fontSize: 9.0,
+                      fontSize: 8.5,
                     ),
                   ),
                 ],
@@ -1293,6 +1463,81 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  /// Renders the live polished text as clickable word tokens so the user can
+  /// tap ANY word that has sound-alike or vocabulary suggestions!
+  Widget _buildInteractiveWordStream() {
+    if (_wordExplorations.isEmpty) {
+      return Text(
+        '"$_polishedLiveText"',
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          color: Color(0xFFFFF59D),
+          fontSize: 12.0,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 0.3,
+        ),
+      );
+    }
+
+    return Wrap(
+      spacing: 4,
+      runSpacing: 2,
+      children: List.generate(_wordExplorations.length, (i) {
+        final Map<String, dynamic> exp = _wordExplorations[i];
+        final String display = '${exp['display'] ?? exp['word'] ?? ''}';
+        final String kind = '${exp['kind'] ?? 'normal'}';
+        final List<dynamic> alts =
+            (exp['alternatives'] as List<dynamic>?) ?? const [];
+        final bool hasAlts = alts.isNotEmpty;
+        final bool isSelected = _selectedWordIndex == i;
+
+        Color underlineCol = Colors.transparent;
+        if (kind == 'confusable') {
+          underlineCol = const Color(0xFF00E5FF);
+        } else if (kind == 'hedging') {
+          underlineCol = const Color(0xFFFF8A80);
+        } else if (kind == 'upgrade') {
+          underlineCol = const Color(0xFFFFEE18);
+        }
+
+        return GestureDetector(
+          onTap: hasAlts
+              ? () {
+                  setState(() {
+                    _selectedWordIndex = i;
+                  });
+                }
+              : null,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+            decoration: BoxDecoration(
+              color: isSelected
+                  ? const Color(0xFF283593)
+                  : (hasAlts ? const Color(0xFF1E293B) : Colors.transparent),
+              border: Border(
+                bottom: BorderSide(
+                  color: underlineCol,
+                  width: hasAlts ? 2.0 : 0.0,
+                ),
+              ),
+            ),
+            child: Text(
+              display,
+              style: TextStyle(
+                color: hasAlts
+                    ? const Color(0xFFFFFFFF)
+                    : const Color(0xFFFFF59D),
+                fontSize: 11.5,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        );
+      }),
     );
   }
 
@@ -1561,7 +1806,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
 
   Widget _buildPixelContextMenu(Color accent) {
     return Container(
-      width: 332,
+      width: 340,
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: const Color(0xF711151E),
@@ -1632,9 +1877,15 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
           ),
           _creatureOptionTile(
             keyId: 'cultist',
-            selected: _isCultistCreature,
-            label: 'Tier 2: Hooded Cultist (medium.en • 1.5GB Grammarly)',
-            color: const Color(0xFFCE93D8),
+            selected: _activeCreature == 'cultist' || _activeCreature == 'monster',
+            label: 'Tier 2A: Ember Cultist (Gungeon Robe • 1.5GB Grammarly)',
+            color: const Color(0xFFFFB300),
+          ),
+          _creatureOptionTile(
+            keyId: 'cultist_lunar',
+            selected: _activeCreature == 'cultist_lunar',
+            label: 'Tier 2B: Lunatic Beak Cultist (Terraria • 1.5GB Grammarly)',
+            color: const Color(0xFF42A5F5),
           ),
           _creatureOptionTile(
             keyId: 'trex',

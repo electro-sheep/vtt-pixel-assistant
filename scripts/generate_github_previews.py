@@ -181,86 +181,126 @@ def build_ptero_sprite():
 
 
 def build_cultist_sprite():
+    """
+    Draws both the Gungeon Ember Void Cultist (left) and Terraria Lunatic Beak Cultist (right)
+    in a 56x40 showcase grid so both skins are visible!
+    """
     grid = make_grid(56, 40)
-    outline = (13, 6, 20, 255)
-    robe_deep = (49, 27, 146, 255)
-    robe_crimson = (106, 27, 77, 255)
-    robe_plum = (142, 36, 170, 255)
-    robe_highlight = (171, 71, 188, 255)
-    gold_trim = (255, 213, 79, 255)
-    gold_dark = (255, 143, 0, 255)
-    void_face = (9, 4, 14, 255)
-    mask_cloth = (26, 15, 46, 255)
-    eye_cyan = (0, 229, 255, 255)
-    parchment = (255, 248, 225, 255)
-    book_cover = (78, 52, 46, 255)
-    quill_feather = (128, 222, 234, 255)
-    boot_leather = (38, 24, 34, 255)
+    outline = (20, 6, 28, 255)
+
+    # --- 1. LEFT: GUNGEON EMBER VOID CULTIST (Image 1 Reference) ---
+    hood_red = (212, 50, 20, 255)
+    hood_orange = (229, 100, 26, 255)
+    hood_purple = (123, 16, 94, 255)
+    gold_bright = (255, 238, 24, 255)
+    gold_mid = (230, 184, 18, 255)
+    gold_shadow = (168, 123, 18, 255)
+    void_navy = (4, 8, 40, 255)
+    eye_cyan = (24, 160, 248, 255)
     white = (255, 255, 255, 255)
+    emerald = (0, 232, 74, 255)
 
-    cx, base_y = 25, 33
-    fill_rect(grid, cx - 5, base_y, 4, 2, boot_leather)
-    fill_rect(grid, cx + 2, base_y, 4, 2, boot_leather)
+    cx, hood_y = 14, 7
+    hood_bounds = [
+        (-4, 4), (-6, 5), (-7, 6), (-8, 7), (-9, 8),
+        (-9, 8), (-9, 9), (-9, 9), (-9, 9), (-9, 8),
+        (-9, 8), (-8, 7), (-7, 6), (-6, 5),
+    ]
+    for r, (xmin, xmax) in enumerate(hood_bounds):
+        y = hood_y + r
+        for dx in range(xmin, xmax + 1):
+            c = hood_orange
+            if r <= 1:
+                c = hood_purple if dx >= 2 else hood_red
+            elif dx >= xmax - 2:
+                c = hood_purple
+            elif r <= 3:
+                c = hood_red
+            set_px(grid, cx + dx, y, c)
 
-    for ry in range(18, 33):
-        progress = (ry - 18) / 14.0
-        half_w = round(5 + progress * 4.5)
-        for rx in range(cx - half_w, cx + half_w + 1):
-            col = robe_crimson
-            if rx < cx - half_w + 2:
-                col = robe_deep
-            if rx > cx + half_w - 2:
-                col = robe_plum
-            if rx == cx + half_w - 1 and ry < 26:
-                col = robe_highlight
-            if abs(rx - cx) <= 1 and ry >= 20:
-                col = gold_trim if ry % 2 == 0 else gold_dark
-            if ry == 32:
-                col = gold_trim if (rx + ry) % 2 == 0 else gold_dark
-            set_px(grid, rx, ry, col)
+    face_cx, face_cy = cx - 1, hood_y + 8
+    draw_oval_filled(grid, face_cx, face_cy, 6, 5, gold_bright)
+    for py in range(face_cy + 1, face_cy + 6):
+        for px in range(face_cx - 6, face_cx + 7):
+            if grid[py][px] == gold_bright:
+                grid[py][px] = gold_shadow if py >= face_cy + 3 else gold_mid
+    draw_oval_filled(grid, face_cx, face_cy + 1, 5, 4, void_navy)
 
-    fill_rect(grid, cx - 6, 24, 13, 2, gold_dark)
-    fill_rect(grid, cx - 1, 24, 3, 2, gold_trim)
-    set_px(grid, cx + 2, 26, gold_trim)
-    set_px(grid, cx + 2, 27, eye_cyan)
+    # 1x2 Cyan + White eyes
+    fill_rect(grid, face_cx - 3, face_cy, 1, 1, eye_cyan)
+    fill_rect(grid, face_cx - 3, face_cy + 1, 1, 1, white)
+    fill_rect(grid, face_cx + 2, face_cy, 1, 1, eye_cyan)
+    fill_rect(grid, face_cx + 2, face_cy + 1, 1, 1, white)
 
-    hood_top_y = 6
-    fill_rect(grid, cx - 7, hood_top_y, 4, 2, robe_deep)
-    fill_rect(grid, cx - 5, hood_top_y + 1, 9, 2, robe_crimson)
-    draw_oval_filled(grid, cx, hood_top_y + 7, 8, 6, robe_crimson)
-    draw_oval_filled(grid, cx + 1, hood_top_y + 6, 7, 5, robe_plum)
+    robe_top = hood_y + 13
+    robe_bot = hood_y + 23
+    for ry in range(robe_top, robe_bot + 1):
+        prog = (ry - robe_top) / 10.0
+        hw = round(5 + prog * 3.0)
+        for rx in range(cx - hw, cx + hw + 1):
+            c = hood_orange
+            if rx >= cx + hw - 2:
+                c = hood_purple
+            elif abs(rx - face_cx) <= 1:
+                c = hood_red
+            if ry >= robe_bot - 1:
+                c = gold_shadow if (rx == face_cx or rx >= cx + hw - 2) else gold_bright
+            set_px(grid, rx, ry, c)
 
-    for hy in range(hood_top_y + 2, hood_top_y + 12):
-        set_px(grid, cx - 6, hy, gold_dark)
-        set_px(grid, cx + 7, hy, gold_trim)
-    fill_rect(grid, cx - 5, hood_top_y + 2, 12, 1, gold_trim)
+    # Emerald Brooch Clasp
+    fill_rect(grid, face_cx - 1, robe_top, 3, 3, gold_bright)
+    set_px(grid, face_cx, robe_top + 1, emerald)
+    # Sleeves & hands
+    fill_rect(grid, cx - 7, robe_top + 3, 2, 1, gold_bright)
+    fill_rect(grid, cx - 7, robe_top + 4, 2, 2, void_navy)
+    fill_rect(grid, cx + 3, robe_top + 3, 3, 1, gold_bright)
+    fill_rect(grid, cx + 3, robe_top + 4, 3, 2, void_navy)
 
-    draw_oval_filled(grid, cx + 1, hood_top_y + 7, 5, 4, void_face)
-    fill_rect(grid, cx - 4, hood_top_y + 9, 11, 3, mask_cloth)
-    fill_rect(grid, cx - 3, hood_top_y + 9, 9, 1, robe_deep)
-    fill_rect(grid, cx, hood_top_y + 10, 3, 1, eye_cyan)
+    # --- 2. RIGHT: TERRARIA LUNATIC BEAK CULTIST (Image 2 Reference) ---
+    blue_deep = (14, 29, 102, 255)
+    blue_royal = (28, 59, 158, 255)
+    blue_cobalt = (46, 92, 230, 255)
+    mask_white = (248, 248, 255, 255)
+    mask_lav = (214, 203, 226, 255)
 
-    fill_rect(grid, cx - 2, hood_top_y + 6, 2, 2, eye_cyan)
-    set_px(grid, cx - 2, hood_top_y + 6, white)
-    fill_rect(grid, cx + 3, hood_top_y + 6, 2, 2, eye_cyan)
-    set_px(grid, cx + 3, hood_top_y + 6, white)
+    lcx, ltop = 41, 7
+    for r in range(11):
+        y = ltop + r
+        lx = lcx - 5
+        rx = lcx + 6 + (r // 3)
+        for x in range(lx, rx + 1):
+            c = blue_royal
+            if r <= 1 and x <= lcx + 1:
+                c = gold_bright
+            elif x <= lx + 1 and r <= 8:
+                c = gold_bright if r < 5 else gold_mid
+            elif x >= rx - 2:
+                c = blue_deep
+            set_px(grid, x, y, c)
+    # Swept-back hood tail to right
+    for tx in range(5):
+        fill_rect(grid, lcx + 6 + tx, ltop + 3 - (tx // 2), 2, 3, blue_royal)
 
-    fill_rect(grid, cx + 4, 19, 6, 4, robe_plum)
-    fill_rect(grid, cx + 9, 19, 1, 4, gold_trim)
-    fill_rect(grid, cx + 10, 20, 2, 2, mask_cloth)
+    # White Plague Beak Mask jutting left
+    for bx in range(7):
+        by_top = ltop + 3 + ((bx * bx) // 12)
+        by_bot = ltop + 8 - (bx // 3)
+        for by in range(by_top, max(by_top + 1, by_bot + 1)):
+            set_px(grid, lcx - 5 - bx, by, mask_lav if by == by_bot else mask_white)
+    fill_rect(grid, lcx - 6, ltop + 4, 2, 2, void_navy)
 
-    book_x, book_y = 39, 17
-    fill_rect(grid, book_x, book_y + 2, 11, 5, book_cover)
-    fill_rect(grid, book_x + 4, book_y + 3, 3, 5, gold_trim)
-    fill_rect(grid, book_x + 1, book_y, 9, 4, parchment)
-    fill_rect(grid, book_x + 2, book_y + 1, 3, 1, robe_deep)
-    fill_rect(grid, book_x + 6, book_y + 1, 2, 1, eye_cyan)
-    fill_rect(grid, book_x + 2, book_y + 2, 4, 1, robe_crimson)
-
-    qx, qy = book_x + 5, book_y - 1
-    set_px(grid, qx, qy + 1, gold_trim)
-    draw_line(grid, qx, qy, qx + 4, qy - 5, quill_feather)
-    draw_line(grid, qx + 1, qy - 1, qx + 5, qy - 5, white)
+    lrobe_top = ltop + 11
+    lrobe_bot = ltop + 23
+    for ry in range(lrobe_top, lrobe_bot + 1):
+        prog = (ry - lrobe_top) / 12.0
+        hw = round(5 + prog * 4.5)
+        for rx in range(lcx - hw, lcx + hw + 1):
+            c = blue_cobalt if (rx < lcx - 1) else (blue_deep if rx > lcx + 2 else blue_royal)
+            if ry == lrobe_top + 1 + abs(rx - lcx) // 2 and abs(rx - lcx) <= 5:
+                c = gold_bright
+            if ry == lrobe_top + 6 + abs(rx - lcx) // 2 and abs(rx - lcx) <= 5:
+                c = gold_mid
+            set_px(grid, rx, ry, c)
 
     apply_outline(grid, outline)
     return grid

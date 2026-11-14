@@ -92,24 +92,34 @@ CREATURE_MODELS: Dict[str, Dict[str, Any]] = {
         "role": "Tier 1: Fast & Lightweight Live Dictation (Whisper Small)",
     },
     "cultist": {
-        "name": "Hooded Cultist Scribe",
+        "name": "Ember Cultist Scribe",
         "tier_num": 2,
         "tier": "Tier 2 • Grammarly Scribe",
         "vram": "~1.5 GB VRAM",
         "model_id": "medium.en",
         "fallback_id": "small.en",
         "compute_type": "int8_float16",
-        "role": "Tier 2: Humanoid Scribe + Full Grammarly & Dyslexia Editor (Whisper Medium)",
+        "role": "Tier 2: Gungeon Ember Scribe + Full Grammarly & Dyslexia Editor (Whisper Medium)",
+    },
+    "cultist_lunar": {
+        "name": "Lunatic Beak Cultist",
+        "tier_num": 2,
+        "tier": "Tier 2 • Grammarly Scribe",
+        "vram": "~1.5 GB VRAM",
+        "model_id": "medium.en",
+        "fallback_id": "small.en",
+        "compute_type": "int8_float16",
+        "role": "Tier 2: Terraria Lunatic Scribe + Full Grammarly & Dyslexia Editor (Whisper Medium)",
     },
     "monster": {
-        "name": "Hooded Cultist Scribe",
+        "name": "Ember Cultist Scribe",
         "tier_num": 2,
         "tier": "Tier 2 • Grammarly Scribe",
         "vram": "~1.5 GB VRAM",
         "model_id": "medium.en",
         "fallback_id": "small.en",
         "compute_type": "int8_float16",
-        "role": "Tier 2: Humanoid Scribe + Full Grammarly & Dyslexia Editor (Whisper Medium)",
+        "role": "Tier 2: Gungeon Ember Scribe + Full Grammarly & Dyslexia Editor (Whisper Medium)",
     },
     "trex": {
         "name": "Apex Green T-Rex",
@@ -605,8 +615,10 @@ class TypeTextReq(BaseModel):
 
 
 class ApplyRecommendationReq(BaseModel):
-    original: str
-    replacement: str
+    original: str = ""
+    replacement: str = ""
+    word_index: int = -1
+    replace_all: bool = False
 
 
 @app.get("/status")
@@ -775,18 +787,53 @@ def type_text(req: TypeTextReq) -> Dict[str, Any]:
 def apply_recommendation(req: ApplyRecommendationReq) -> Dict[str, Any]:
     with engine.lock:
         old_text = engine.polished_live_text
-        if not old_text or req.original not in old_text:
+        if not old_text:
             return get_status()
-        new_text = old_text.replace(req.original, req.replacement, 1)
+
+        if req.replace_all and req.replacement:
+            new_text = req.replacement.strip()
+        elif req.word_index >= 0:
+            tokens = old_text.split()
+            if 0 <= req.word_index < len(tokens):
+                tok = tokens[req.word_index]
+                m = re.match(r"^([^A-Za-z']*)([A-Za-z']+)([^A-Za-z']*)$", tok)
+                if req.replacement == "[DROP]":
+                    tokens.pop(req.word_index)
+                    new_text = " ".join(tokens)
+                elif m:
+                    prefix, _, suffix = m.group(1), m.group(2), m.group(3)
+                    tokens[req.word_index] = f"{prefix}{req.replacement}{suffix}"
+                    new_text = " ".join(tokens)
+                else:
+                    tokens[req.word_index] = req.replacement
+                    new_text = " ".join(tokens)
+            else:
+                return get_status()
+        elif req.original and req.original in old_text:
+            if req.replacement == "[DROP]":
+                new_text = re.sub(
+                    r"\s*\b" + re.escape(req.original) + r"\b\s*",
+                    " ",
+                    old_text,
+                    count=1,
+                ).strip()
+            else:
+                new_text = old_text.replace(req.original, req.replacement, 1)
+        else:
+            return get_status()
+
+        if new_text:
+            new_text = new_text[0].upper() + new_text[1:]
+
         engine.polished_live_text = new_text
         if engine.session_history and engine.session_history[-1] == old_text:
             engine.session_history[-1] = new_text
         engine.total_fixes_applied += 1
         engine.recent_fixes.append(
             {
-                "original": req.original,
+                "original": req.original or old_text,
                 "replacement": req.replacement,
-                "reason": "Applied Grammarly recommendation on page",
+                "reason": "Applied word-choice / rewrite upgrade on page",
                 "category": "clarity",
             }
         )
@@ -803,7 +850,7 @@ def apply_recommendation(req: ApplyRecommendationReq) -> Dict[str, Any]:
         engine.pet_anim_state = "fixing"
         engine._enqueue_screen_edit(bs, to_type)
         engine.status_message = (
-            f"Helper upgraded: \"{req.original}\" → \"{req.replacement}\""
+            f"Helper upgraded: \"{req.original or 'sentence'}\" → \"{req.replacement}\""
         )
     return get_status()
 

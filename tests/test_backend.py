@@ -83,6 +83,19 @@ def test_grammarly_4_pillar_clarity_and_recommendations():
     assert "really good" in originals
     assert "a lot of" in originals
 
+    # Test Next-Gen Word Explorations (sound-alikes, vocabulary upgrades, hedges) & Sentence Variants
+    exp_report = engine.generate_grammarly_recommendations(
+        "I think that we basically need to make a big change right now."
+    )
+    explorations = exp_report["word_explorations"]
+    kinds = {w["word"].lower(): w["kind"] for w in explorations}
+    assert kinds.get("basically") == "hedging"
+    assert kinds.get("make") == "upgrade"
+    assert kinds.get("big") == "upgrade"
+    assert kinds.get("change") == "upgrade"
+    assert kinds.get("right") == "confusable"
+    assert len(exp_report["sentence_variants"]) >= 1
+
 
 def test_contextual_homophones_their_there_theyre():
     engine = LocalDyslexiaGrammarEngine()
@@ -241,10 +254,15 @@ def test_engine_endpoints_and_3_tier_progression():
     assert s1["creature_tier"] == 1
     assert s1["creature_name"] == "Sky Pterodactyl"
 
-    # Tier 2: Cultist Scribe
+    # Tier 2A: Ember Cultist Scribe (Gungeon style)
     s2 = vtt_engine.switch_creature(vtt_engine.CreatureSwitchReq(creature="cultist"))
     assert s2["creature_tier"] == 2
-    assert s2["creature_name"] == "Hooded Cultist Scribe"
+    assert s2["creature_name"] == "Ember Cultist Scribe"
+
+    # Tier 2B: Lunatic Beak Cultist (Terraria style)
+    s2b = vtt_engine.switch_creature(vtt_engine.CreatureSwitchReq(creature="cultist_lunar"))
+    assert s2b["creature_tier"] == 2
+    assert s2b["creature_name"] == "Lunatic Beak Cultist"
 
     # Tier 3: Green T-Rex
     s3 = vtt_engine.switch_creature(vtt_engine.CreatureSwitchReq(creature="trex"))

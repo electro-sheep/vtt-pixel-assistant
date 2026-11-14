@@ -620,6 +620,272 @@ class LocalDyslexiaGrammarEngine:
                 "Delivery",
             ),
         ]
+        self.sound_alike_map: Dict[str, List[str]] = self._build_sound_alike_map()
+        self.word_upgrade_map: Dict[str, List[str]] = self._build_word_upgrade_map()
+        self.hedging_words: set[str] = {
+            "basically",
+            "actually",
+            "literally",
+            "honestly",
+            "just",
+            "maybe",
+            "perhaps",
+            "simply",
+            "somehow",
+            "virtually",
+        }
+
+    def _build_sound_alike_map(self) -> Dict[str, List[str]]:
+        """
+        Groups of phonetic sound-alikes / homophones / near-homophones where
+        voice transcription might pick one word when the speaker meant another.
+        """
+        groups = [
+            ["their", "there", "they're"],
+            ["your", "you're", "yore"],
+            ["to", "too", "two"],
+            ["its", "it's"],
+            ["then", "than"],
+            ["affect", "effect"],
+            ["accept", "except"],
+            ["weather", "whether"],
+            ["lose", "loose"],
+            ["passed", "past"],
+            ["aloud", "allowed"],
+            ["piece", "peace"],
+            ["break", "brake"],
+            ["sight", "site", "cite"],
+            ["right", "write", "rite"],
+            ["new", "knew"],
+            ["no", "know"],
+            ["role", "roll"],
+            ["lead", "led"],
+            ["principal", "principle"],
+            ["complement", "compliment"],
+            ["discrete", "discreet"],
+            ["ensure", "insure", "assure"],
+            ["adapt", "adopt", "adept"],
+            ["farther", "further"],
+            ["allusion", "illusion"],
+            ["stationary", "stationery"],
+            ["council", "counsel"],
+            ["capital", "capitol"],
+            ["emigrate", "immigrate"],
+            ["hear", "here"],
+            ["whole", "hole"],
+            ["wear", "where", "ware"],
+            ["week", "weak"],
+            ["wait", "weight"],
+            ["way", "weigh"],
+        ]
+        mapping: Dict[str, List[str]] = {}
+        for grp in groups:
+            for w in grp:
+                mapping[w] = [other for other in grp if other != w]
+        return mapping
+
+    def _build_word_upgrade_map(self) -> Dict[str, List[str]]:
+        """
+        Context-rich vocabulary & precision upgrades for common spoken words
+        so the user can click any word in their transcription and swap it.
+        """
+        return {
+            "good": ["excellent", "effective", "solid", "polished"],
+            "great": ["outstanding", "exceptional", "remarkable", "superb"],
+            "bad": ["flawed", "suboptimal", "poor", "problematic"],
+            "big": ["substantial", "significant", "major", "massive"],
+            "small": ["compact", "minimal", "lightweight", "modest"],
+            "make": ["create", "build", "craft", "engineer"],
+            "making": ["creating", "building", "crafting", "designing"],
+            "made": ["created", "built", "crafted", "engineered"],
+            "change": ["transform", "overhaul", "refine", "modify"],
+            "changes": ["improvements", "updates", "revisions", "upgrades"],
+            "changing": ["transforming", "updating", "refining", "shifting"],
+            "use": ["utilize", "leverage", "employ", "apply"],
+            "using": ["utilizing", "leveraging", "employing", "applying"],
+            "used": ["utilized", "leveraged", "employed", "applied"],
+            "help": ["assist", "empower", "support", "enable"],
+            "helping": ["assisting", "empowering", "supporting", "enabling"],
+            "show": ["demonstrate", "display", "illustrate", "reveal"],
+            "showing": ["demonstrating", "displaying", "highlighting", "revealing"],
+            "look": ["appearance", "aesthetic", "design", "style"],
+            "looking": ["examining", "inspecting", "exploring", "viewing"],
+            "think": ["believe", "consider", "envision", "assess"],
+            "need": ["require", "demand", "must have", "depend on"],
+            "want": ["aim", "intend", "prefer", "seek"],
+            "get": ["obtain", "achieve", "acquire", "reach"],
+            "getting": ["achieving", "obtaining", "reaching", "building"],
+            "fix": ["resolve", "repair", "correct", "rectify"],
+            "fixing": ["resolving", "repairing", "correcting", "polishing"],
+            "work": ["function", "operate", "perform", "succeed"],
+            "working": ["functioning", "operating", "performing", "running"],
+            "fast": ["rapid", "instant", "swift", "responsive"],
+            "hard": ["challenging", "complex", "demanding", "difficult"],
+            "easy": ["effortless", "intuitive", "seamless", "straightforward"],
+            "important": ["crucial", "essential", "vital", "critical"],
+            "thing": ["element", "feature", "component", "aspect"],
+            "things": ["elements", "features", "components", "details"],
+            "stuff": ["material", "content", "features", "components"],
+            "problem": ["issue", "challenge", "bottleneck", "obstacle"],
+            "problems": ["issues", "challenges", "bottlenecks", "obstacles"],
+            "idea": ["concept", "vision", "approach", "strategy"],
+            "system": ["architecture", "platform", "engine", "framework"],
+            "way": ["method", "approach", "mechanism", "workflow"],
+            "happy": ["pleased", "delighted", "thrilled", "satisfied"],
+            "improve": ["enhance", "elevate", "refine", "optimize"],
+            "improving": ["enhancing", "elevating", "refining", "optimizing"],
+            "improvements": ["enhancements", "upgrades", "refinements", "advances"],
+            "create": ["architect", "generate", "craft", "develop"],
+            "creating": ["architecting", "generating", "crafting", "developing"],
+            "start": ["launch", "initiate", "begin", "kick off"],
+            "keep": ["maintain", "preserve", "continue", "sustain"],
+            "really": ["truly", "genuinely", "significantly", "remarkably"],
+            "very": ["highly", "exceptionally", "deeply", "exceedingly"],
+            "nice": ["sleek", "refined", "pleasant", "polished"],
+            "better": ["superior", "stronger", "sharper", "more effective"],
+            "best": ["finest", "optimal", "premier", "top-tier"],
+            "talk": ["speak", "dictate", "communicate", "converse"],
+            "write": ["compose", "draft", "author", "transcribe"],
+            "writing": ["composing", "drafting", "authoring", "transcribing"],
+        }
+
+    def _match_case(self, source: str, target: str) -> str:
+        if not source or not target:
+            return target
+        if source.isupper() and len(source) > 1:
+            return target.upper()
+        if source[0].isupper():
+            return target[0].upper() + target[1:]
+        return target
+
+    def _build_word_explorations_and_variants(
+        self, text: str
+    ) -> Tuple[List[Dict[str, object]], List[Dict[str, str]]]:
+        """
+        Tokenizes `text` into interactive word objects with:
+        - `word`: raw token (e.g. 'change')
+        - `display`: token with punctuation (e.g. 'change,')
+        - `kind`: 'confusable' | 'upgrade' | 'hedging' | 'normal'
+        - `alternatives`: list of 1-click replacement strings (plus '[DROP]' for hedges)
+        - `hint`: human-readable explanation of why alternatives are offered
+        Also generates 1-click full-sentence rewrite variants ('Concise', 'Elevated').
+        """
+        explorations: List[Dict[str, object]] = []
+        raw_tokens = text.split()
+        for idx, tok in enumerate(raw_tokens):
+            m = re.match(r"^([^A-Za-z']*)([A-Za-z']+)([^A-Za-z']*)$", tok)
+            if not m:
+                explorations.append(
+                    {
+                        "index": idx,
+                        "word": tok,
+                        "display": tok,
+                        "kind": "normal",
+                        "alternatives": [],
+                        "hint": "",
+                    }
+                )
+                continue
+
+            prefix, core, suffix = m.group(1), m.group(2), m.group(3)
+            low = core.lower()
+            alts: List[str] = []
+            kind = "normal"
+            hint = ""
+
+            if low in self.hedging_words:
+                kind = "hedging"
+                hint = f"Spoken hedge/filler '{core}' — drop it or swap:"
+                alts.append("[DROP]")
+                if low in self.word_upgrade_map:
+                    for cand in self.word_upgrade_map[low][:3]:
+                        alts.append(self._match_case(core, cand))
+            elif low in self.sound_alike_map and low in self.word_upgrade_map:
+                kind = "confusable"
+                hint = f"Sound-alike or vocabulary upgrade for '{core}':"
+                for sa in self.sound_alike_map[low][:2]:
+                    alts.append(self._match_case(core, sa))
+                for up in self.word_upgrade_map[low][:3]:
+                    alts.append(self._match_case(core, up))
+            elif low in self.sound_alike_map:
+                kind = "confusable"
+                hint = f"Sound-alike check — did you mean one of these instead of '{core}'?"
+                for sa in self.sound_alike_map[low][:3]:
+                    alts.append(self._match_case(core, sa))
+            elif low in self.word_upgrade_map:
+                kind = "upgrade"
+                hint = f"Stronger or more precise alternatives for '{core}':"
+                for up in self.word_upgrade_map[low][:4]:
+                    alts.append(self._match_case(core, up))
+
+            explorations.append(
+                {
+                    "index": idx,
+                    "word": core,
+                    "display": tok,
+                    "prefix": prefix,
+                    "suffix": suffix,
+                    "kind": kind,
+                    "alternatives": alts,
+                    "hint": hint,
+                }
+            )
+
+        variants: List[Dict[str, str]] = []
+        concise = text
+        concise_patterns = [
+            (r"\bI\s+think\s+that\s+", ""),
+            (r"\bI\s+feel\s+like\s+", ""),
+            (r"\b(?:basically|actually|literally|honestly|just|really|very|sort\s+of|kind\s+of)\s+", ""),
+            (r"\bin\s+my\s+opinion[,\s]*", ""),
+        ]
+        for pat, rep in concise_patterns:
+            concise = re.sub(pat, rep, concise, flags=re.IGNORECASE)
+        concise = re.sub(r" {2,}", " ", concise).strip()
+        if concise:
+            concise = concise[0].upper() + concise[1:]
+        if concise and concise != text and len(concise.split()) >= 2:
+            variants.append(
+                {
+                    "label": "CONCISE",
+                    "description": "Tighter, zero-fluff version",
+                    "text": concise,
+                }
+            )
+
+        elevated = concise or text
+        elevated_swaps = [
+            (r"\bmake\b", "create"),
+            (r"\bbig\b", "substantial"),
+            (r"\bgood\b", "excellent"),
+            (r"\bbad\b", "suboptimal"),
+            (r"\bfix\b", "resolve"),
+            (r"\buse\b", "utilize"),
+            (r"\bhelp\b", "assist"),
+            (r"\bneed\s+to\b", "must"),
+            (r"\ba\s+lot\s+of\b", "numerous"),
+            (r"\bcan't\b", "cannot"),
+            (r"\bdon't\b", "do not"),
+        ]
+        for pat, rep in elevated_swaps:
+            elevated = re.sub(
+                pat,
+                lambda m, r=rep: self._match_case(m.group(0), r),
+                elevated,
+                flags=re.IGNORECASE,
+            )
+        if elevated:
+            elevated = elevated[0].upper() + elevated[1:]
+        if elevated and elevated != text and elevated != concise:
+            variants.append(
+                {
+                    "label": "ELEVATED",
+                    "description": "Polished executive vocabulary",
+                    "text": elevated,
+                }
+            )
+
+        return explorations, variants
 
     def set_rules(self, updates: Dict[str, bool]) -> Dict[str, bool]:
         for k, v in updates.items():
@@ -655,6 +921,8 @@ class LocalDyslexiaGrammarEngine:
                     "delivery": 100,
                 },
                 "recommendations": [],
+                "word_explorations": [],
+                "sentence_variants": [],
             }
 
         recs: List[Dict[str, str]] = []
@@ -709,6 +977,10 @@ class LocalDyslexiaGrammarEngine:
         else:
             detected_tone = "Direct & Clear"
 
+        word_explorations, sentence_variants = (
+            self._build_word_explorations_and_variants(text)
+        )
+
         return {
             "writing_score": int(overall),
             "detected_tone": detected_tone,
@@ -719,6 +991,8 @@ class LocalDyslexiaGrammarEngine:
                 "delivery": delivery_score,
             },
             "recommendations": recs[:6],
+            "word_explorations": word_explorations,
+            "sentence_variants": sentence_variants,
         }
 
     def process_text(

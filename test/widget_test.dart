@@ -6,7 +6,7 @@ import 'package:vtt_assistant/pixel_sprites.dart';
 
 void main() {
   group('HighResPixelGenerator 3-Tier Sprite & Terrain Floor Tests', () {
-    const List<String> creatures = ['ptero', 'cultist', 'trex'];
+    const List<String> creatures = ['ptero', 'cultist', 'cultist_lunar', 'trex'];
     const List<String> states = [
       'idle',
       'walk',
@@ -151,7 +151,8 @@ void main() {
       await tester.pump();
 
       expect(find.text('PIXEL ASSISTANT & TIER MENU'), findsOneWidget);
-      expect(find.textContaining('Hooded Cultist'), findsOneWidget);
+      expect(find.textContaining('Ember Cultist'), findsOneWidget);
+      expect(find.textContaining('Lunatic Beak Cultist'), findsOneWidget);
       expect(find.textContaining('Sky Pterodactyl'), findsOneWidget);
     });
   });
