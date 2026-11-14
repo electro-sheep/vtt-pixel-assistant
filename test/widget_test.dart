@@ -6,7 +6,13 @@ import 'package:vtt_assistant/pixel_sprites.dart';
 
 void main() {
   group('HighResPixelGenerator 3-Tier Sprite & Terrain Floor Tests', () {
-    const List<String> creatures = ['ptero', 'cultist', 'cultist_lunar', 'trex'];
+    const List<String> creatures = [
+      'review',
+      'ptero',
+      'cultist',
+      'cultist_lunar',
+      'trex',
+    ];
     const List<String> states = [
       'idle',
       'walk',
@@ -99,10 +105,11 @@ void main() {
       expect(find.textContaining('Click creature to transcribe'), findsOneWidget);
       expect(find.text('[▼ EXPAND]'), findsOneWidget);
 
-      // Clicking the flat floor bar expands it to reveal the 3-Tier Progression & Live Text HUD
+      // Clicking the flat floor bar expands it to reveal the 4-Option Mode & Tier Progression HUD
       await tester.tap(find.text('[▼ EXPAND]'));
       await tester.pump();
 
+      expect(find.text('T0: REVIEW'), findsOneWidget);
       expect(find.text('T1: PTERO'), findsOneWidget);
       expect(find.text('T2: CULTIST'), findsOneWidget);
       expect(find.text('T3: T-REX'), findsOneWidget);
@@ -110,13 +117,19 @@ void main() {
       expect(find.text('▲ FLAT'), findsOneWidget);
     });
 
-    testWidgets('Switches across 3 Creature Tiers and opens Dyslexia & Grammarly Writing Studio',
+    testWidgets('Switches across Tier 0 (Pure Text Review) and Tiers 1-3, and opens Writing Studio',
         (WidgetTester tester) async {
       await tester.pumpWidget(const VttPixelAssistantApp());
 
       // Expand floor box
       await tester.tap(find.text('[▼ EXPAND]'));
       await tester.pump();
+
+      // Switch to Tier 0: Pure Text Reviewer (No VTT)
+      await tester.tap(find.text('T0: REVIEW'));
+      await tester.pump();
+      expect(find.textContaining('No-VTT (Review Only)'), findsOneWidget);
+      expect(find.text('🔍 REVIEW TEXT'), findsOneWidget);
 
       // Switch to Tier 1: Pterodactyl
       await tester.tap(find.text('T1: PTERO'));

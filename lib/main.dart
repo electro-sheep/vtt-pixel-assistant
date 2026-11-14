@@ -244,7 +244,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
         final Map<String, dynamic> data =
             jsonDecode(body) as Map<String, dynamic>;
 
-        if (checkVersion && data['engine_version'] != '3.3') {
+        if (checkVersion && data['engine_version'] != '3.4') {
           await _postBackend('/shutdown', {});
           await Future<void>.delayed(const Duration(milliseconds: 350));
           return false;
@@ -631,16 +631,21 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     return _engineAnimState;
   }
 
+  bool get _isReviewOnlyMode => _activeCreature == 'review';
+
   bool get _isCultistCreature =>
       _activeCreature == 'cultist' ||
       _activeCreature == 'cultist_lunar' ||
+      _activeCreature == 'review' ||
       _activeCreature == 'monster';
 
   bool get _isPteroCreature =>
       _activeCreature == 'ptero' || _activeCreature == 'stego';
 
   Color _creatureAccentColor() {
-    if (_activeCreature == 'trex') {
+    if (_activeCreature == 'review') {
+      return const Color(0xFFEA80FC); // Tier 0: Arcane Reviewer Amethyst
+    } else if (_activeCreature == 'trex') {
       return const Color(0xFF66BB6A); // Tier 3: Jurassic Emerald Green
     } else if (_activeCreature == 'cultist_lunar') {
       return const Color(0xFFFFF038); // Tier 2B: Lunatic Cultist Royal Gold
@@ -671,7 +676,16 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
   void _switchCreatureTier(String creatureKey) {
     setState(() {
       _activeCreature = creatureKey;
-      if (creatureKey == 'ptero') {
+      if (creatureKey == 'review') {
+        _isListening = false;
+        _creatureName = 'Arcane Text Reviewer';
+        _creatureTier = 0;
+        _creatureVram = '0.0 GB VRAM';
+        _modelName = 'No-VTT (Review Only)';
+        _computeBackend = '0GB Local';
+        _statusMessage =
+            'Pure Text Reviewer [No-VTT • 0GB] ready! Click creature or 🔍 REVIEW to inspect current text.';
+      } else if (creatureKey == 'ptero') {
         _creatureName = 'Sky Pterodactyl';
         _creatureTier = 1;
         _creatureVram = '~0.5 GB VRAM';
@@ -694,6 +708,19 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     });
     _updateFocusAllowance();
     _postBackend('/switch_creature', {'creature': creatureKey});
+  }
+
+  void _reviewCurrentScreenText({bool applyImmediately = false}) {
+    setState(() {
+      _setFloorExpanded(true);
+      _localTrickState = applyImmediately ? 'fixing' : 'curious';
+      _trickTicksRemaining = 18;
+    });
+    _syncInteractiveRects();
+    _windowChannel.invokeMethod('restoreExternalFocus');
+    _postBackend('/review_selection', {
+      'apply_immediately': applyImmediately,
+    });
   }
 
   void _toggleCultistSkin() {
@@ -969,48 +996,61 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                     ),
                   ],
                 ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 6,
-                      height: 6,
-                      margin: const EdgeInsets.only(right: 5),
-                      color: _backendConnected
-                          ? const Color(0xFF00E676)
-                          : const Color(0xFFFF5252),
-                    ),
-                    _miniPixelButton(
-                      label: _isListening ? '■ STOP' : '● REC',
-                      color: _isListening
-                          ? const Color(0xFFFF5252)
-                          : const Color(0xFF00E676),
-                      tooltip: 'Start/stop live voice transcription (F8)',
-                      onTap: () {
-                        setState(() {
-                          _setFloorExpanded(true);
-                        });
-                        _syncInteractiveRects();
-                        _windowChannel.invokeMethod('restoreExternalFocus');
-                        _postBackend('/toggle_listen', {});
-                      },
-                    ),
-                    const SizedBox(width: 7),
-                    Expanded(
-                      child: Text(
-                        _polishedLiveText.isNotEmpty
-                            ? '"$_polishedLiveText"'
-                            : 'TIER $_creatureTier: ${_creatureName.toUpperCase()} • Click creature to transcribe',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: _polishedLiveText.isNotEmpty
-                              ? const Color(0xFFFFF59D)
-                              : const Color(0xFFE0F2F1),
-                          fontSize: 10.0,
-                          fontWeight: FontWeight.bold,
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 6,
+                        height: 6,
+                        margin: const EdgeInsets.only(right: 5),
+                        color: _backendConnected
+                            ? const Color(0xFF00E676)
+                            : const Color(0xFFFF5252),
+                      ),
+                      if (!_isReviewOnlyMode) ...[
+                        _miniPixelButton(
+                          label: _isListening ? '■ STOP' : '● REC',
+                          color: _isListening
+                              ? const Color(0xFFFF5252)
+                              : const Color(0xFF00E676),
+                          tooltip: 'Start/stop live voice transcription (F8)',
+                          onTap: () {
+                            setState(() {
+                              _setFloorExpanded(true);
+                            });
+                            _syncInteractiveRects();
+                            _windowChannel.invokeMethod('restoreExternalFocus');
+                            _postBackend('/toggle_listen', {});
+                          },
+                        ),
+                        const SizedBox(width: 4),
+                      ],
+                      _miniPixelButton(
+                        label: '🔍 REVIEW',
+                        color: const Color(0xFFEA80FC),
+                        tooltip:
+                            'Review current text on screen without transcription & show suggestions!',
+                        onTap: () =>
+                            _reviewCurrentScreenText(applyImmediately: false),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          _polishedLiveText.isNotEmpty
+                              ? '"$_polishedLiveText"'
+                              : (_isReviewOnlyMode
+                                  ? 'TIER 0: PURE TEXT REVIEWER (No VTT) • Click to inspect text'
+                                  : 'TIER $_creatureTier: ${_creatureName.toUpperCase()} • Click creature to transcribe'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: _polishedLiveText.isNotEmpty
+                                ? const Color(0xFFFFF59D)
+                                : const Color(0xFFE0F2F1),
+                            fontSize: 10.0,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
-                    ),
                     const SizedBox(width: 6),
                     Container(
                       padding: const EdgeInsets.symmetric(
@@ -1091,12 +1131,21 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          // A. 3-Tier Creature & Whisper Progression Selector + Cultist Skin Toggle + Collapse
+          // A. 4-Option Mode & Whisper Tier Progression Bar (T0 Pure Review + T1-T3 VTT)
           Row(
             children: [
               Expanded(
                 child: Row(
                   children: [
+                    _tierPillButton(
+                      tierNumber: 0,
+                      title: 'REVIEW',
+                      subtitle: 'No-VTT 0G',
+                      creatureKey: 'review',
+                      selected: _isReviewOnlyMode,
+                      color: const Color(0xFFEA80FC),
+                    ),
+                    const SizedBox(width: 3),
                     _tierPillButton(
                       tierNumber: 1,
                       title: 'PTERO',
@@ -1105,7 +1154,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                       selected: _isPteroCreature,
                       color: const Color(0xFF26C6DA),
                     ),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 3),
                     _tierPillButton(
                       tierNumber: 2,
                       title: 'CULTIST',
@@ -1113,10 +1162,10 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                           ? 'Lunar 1.5G'
                           : 'Ember 1.5G',
                       creatureKey: _cultistSkin,
-                      selected: _isCultistCreature,
+                      selected: _isCultistCreature && !_isReviewOnlyMode,
                       color: const Color(0xFFFFD54F),
                     ),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 3),
                     _tierPillButton(
                       tierNumber: 3,
                       title: 'T-REX',
@@ -1128,8 +1177,8 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                   ],
                 ),
               ),
-              if (_isCultistCreature) ...[
-                const SizedBox(width: 4),
+              if (_isCultistCreature && !_isReviewOnlyMode) ...[
+                const SizedBox(width: 3),
                 _miniPixelButton(
                   label: _activeCreature == 'cultist_lunar' ? 'ROBE: BLUE' : 'ROBE: RED',
                   color: _activeCreature == 'cultist_lunar'
@@ -1140,7 +1189,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                   onTap: _toggleCultistSkin,
                 ),
               ],
-              const SizedBox(width: 4),
+              const SizedBox(width: 3),
               _miniPixelButton(
                 label: '▲ FLAT',
                 color: const Color(0xFF90A4AE),
@@ -1157,20 +1206,30 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
 
           const SizedBox(height: 6),
 
-          // B. Main Dictation Controls & Target Window Indicator
+          // B. Main Dictation / Pure Text Review Controls & Target Window Indicator
           Row(
             children: [
-              _miniPixelButton(
-                label: _isListening ? '■ STOP' : '● REC',
-                color: _isListening
-                    ? const Color(0xFFFF5252)
-                    : const Color(0xFF00E676),
-                tooltip: 'Start or stop live voice dictation (or press F8)',
-                onTap: () {
-                  _windowChannel.invokeMethod('restoreExternalFocus');
-                  _postBackend('/toggle_listen', {});
-                },
-              ),
+              if (_isReviewOnlyMode)
+                _miniPixelButton(
+                  label: '🔍 REVIEW TEXT',
+                  color: const Color(0xFFEA80FC),
+                  tooltip:
+                      'Inspect current screen text without transcription & show word/sentence suggestions!',
+                  onTap: () =>
+                      _reviewCurrentScreenText(applyImmediately: false),
+                )
+              else
+                _miniPixelButton(
+                  label: _isListening ? '■ STOP' : '● REC',
+                  color: _isListening
+                      ? const Color(0xFFFF5252)
+                      : const Color(0xFF00E676),
+                  tooltip: 'Start or stop live voice dictation (or press F8)',
+                  onTap: () {
+                    _windowChannel.invokeMethod('restoreExternalFocus');
+                    _postBackend('/toggle_listen', {});
+                  },
+                ),
               const SizedBox(width: 6),
               Expanded(
                 child: Column(
@@ -1200,14 +1259,23 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                   ],
                 ),
               ),
+              if (!_isReviewOnlyMode) ...[
+                _miniPixelButton(
+                  label: '🔍 REVIEW',
+                  color: const Color(0xFFEA80FC),
+                  tooltip:
+                      'Inspect current text on screen without transcription & show suggestions',
+                  onTap: () =>
+                      _reviewCurrentScreenText(applyImmediately: false),
+                ),
+                const SizedBox(width: 4),
+              ],
               _miniPixelButton(
                 label: 'FIX',
                 color: const Color(0xFF00E5FF),
-                tooltip: 'Fix highlighted text on page (F9)',
-                onTap: () {
-                  _windowChannel.invokeMethod('restoreExternalFocus');
-                  _postBackend('/review_selection', {});
-                },
+                tooltip:
+                    'Review and immediately apply auto-fixes to current text on screen',
+                onTap: () => _reviewCurrentScreenText(applyImmediately: true),
               ),
               const SizedBox(width: 4),
               _miniPixelButton(
@@ -1271,11 +1339,13 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
               children: [
                 Expanded(
                   child: _polishedLiveText.isEmpty
-                      ? const Text(
-                          'Click your companion above (or ● REC) and speak — words appear live here and you can click any word to swap synonyms or sound-alikes!',
+                      ? Text(
+                          _isReviewOnlyMode
+                              ? 'Pure Text Reviewer (No VTT): Click inside any text box or highlight text, then click your companion or 🔍 REVIEW TEXT to inspect & improve!'
+                              : 'Click your companion above (or ● REC) and speak — or click 🔍 REVIEW anytime to inspect existing text without transcription!',
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
+                          style: const TextStyle(
                             color: Color(0xFF78909C),
                             fontSize: 9.5,
                           ),
@@ -1287,7 +1357,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                                 _rawLiveText.trim() !=
                                     _polishedLiveText.trim())
                               Text(
-                                'Heard: $_rawLiveText',
+                                '${_isReviewOnlyMode ? 'Original' : 'Heard'}: $_rawLiveText',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
@@ -1301,7 +1371,19 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                         ),
                 ),
                 if (_polishedLiveText.isNotEmpty) ...[
-                  const SizedBox(width: 6),
+                  if (_rawLiveText.isNotEmpty &&
+                      _rawLiveText.trim() != _polishedLiveText.trim()) ...[
+                    const SizedBox(width: 4),
+                    _miniPixelButton(
+                      label: '✓ APPLY FIX',
+                      color: const Color(0xFF00E676),
+                      tooltip:
+                          'Apply all auto-fixes shown above directly to the screen',
+                      onTap: () =>
+                          _applyFullSentenceVariant(_polishedLiveText),
+                    ),
+                  ],
+                  const SizedBox(width: 4),
                   _miniPixelButton(
                     label: 'INSERT',
                     color: const Color(0xFF69F0AE),
@@ -1861,7 +1943,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
           const Divider(color: Color(0xFF37474F), height: 10),
 
           const Text(
-            '3-TIER MODEL & CREATURE PROGRESSION:',
+            'MODE & MODEL TIER PROGRESSION:',
             style: TextStyle(
               color: Color(0xFF90A4AE),
               fontSize: 10,
@@ -1869,6 +1951,12 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
             ),
           ),
           const SizedBox(height: 4),
+          _creatureOptionTile(
+            keyId: 'review',
+            selected: _isReviewOnlyMode,
+            label: 'Tier 0: Pure Text Reviewer (No VTT • 0.0GB VRAM)',
+            color: const Color(0xFFEA80FC),
+          ),
           _creatureOptionTile(
             keyId: 'ptero',
             selected: _isPteroCreature,

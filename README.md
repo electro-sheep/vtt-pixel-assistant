@@ -1,22 +1,23 @@
-# VTT Pixel Assistant v3.3 — 100% Local Voice Dictation, 3-Tier AI Progression & Grammarly / Dyslexia Companion
+# VTT Pixel Assistant v3.4 — 100% Local Voice Dictation, Pure Text Review (No-VTT), 4-Tier AI Progression & Grammarly Companion
 
 ![VTT Pixel Assistant Showcase](docs/images/vtt_assistant_showcase.png)
 
 **VTT Pixel Assistant** is a 100% local, privacy-first desktop voice-to-text (VTT) and Grammarly-style dyslexia writing companion built with **Flutter Desktop (Win32 Transparent Click-Through Overlay)** and a **CUDA-accelerated Python FastAPI + `faster-whisper` backend**.
 
-Instead of a bulky floating HUD box above your companion, the assistant's UI lives **underneath the creature as a Living Pixel Terrain Floor** — starting as a compact, flat grass or cobblestone platform (`Click creature to transcribe`) that expands on click to reveal live streaming transcription, a 3-Tier AI progression switcher, and interactive 1-click Grammarly helper recommendations.
+Instead of a bulky floating HUD box above your companion, the assistant's UI lives **underneath the creature as a Living Pixel Terrain Floor** — starting as a compact, flat grass or cobblestone platform (`Click creature to transcribe` or `[🔍 REVIEW]`) that expands on click to reveal live streaming transcription, pure screen-text review without transcription, clickable word-choice exploration, and 1-click Grammarly helper recommendations.
 
 ---
 
-## 🦖 The 3-Tier Creature & Whisper AI Model Progression
+## 🦖 The 4-Option Mode & Whisper AI Model Progression
 
-Each pixel-art companion represents a distinct tier of local GPU speech-to-text and writing power, standing on its own themed terrain floor:
+Each pixel-art mode represents a distinct tier of local writing or speech-to-text power, standing on its own themed terrain floor:
 
-| Tier | Companion & Terrain | Local Whisper Model | VRAM Footprint | Purpose & Progression Role |
+| Tier | Companion & Terrain | Local Model | VRAM Footprint | Purpose & Progression Role |
 | :--- | :--- | :--- | :--- | :--- |
-| **Tier 1: Lightweight Speed** | ![Sky Pterodactyl](docs/images/tier1_sky_pterodactyl.png) | `small.en` (`int8_float16`) | `~0.5 GB VRAM` | **Agile & Ultra-Low Resource**: Ideal when gaming or running heavy GPU workloads while still wanting instant everyday voice dictation on a swaying prehistoric grass floor. |
-| **Tier 2: Grammarly Scribe** | ![Hooded Cultist](docs/images/tier2_hooded_cultist.png) | `medium.en` (`int8_float16`) | `~1.5 GB VRAM` | **Humanoid Robed Scribe**: A hooded arcane scribe with a covered face and levitating quill & grimoire standing on a candle-lit cobblestone altar — balanced speech recognition paired with the 4-Pillar Grammarly & Dyslexia mentor. |
-| **Tier 3: Apex Powerhouse** | ![Apex Green T-Rex](docs/images/tier3_apex_green_trex.png) | `large-v3-turbo` (`int8_float16`) | `~2.0 GB VRAM` | **Maximum Speech Accuracy**: Heavyweight GPU transcription engine for technical vocabulary, complex phrasing, and long-form dictation on lush prehistoric fern turf. |
+| **Tier 0: Pure Text Review (`T0: REVIEW`)** | ![Hooded Cultist](docs/images/tier2_hooded_cultist.png) | `No-VTT (Review Only)` | `0.0 GB VRAM` | **Pure Current-Text Reviewer (No Transcription)**: Runs with **zero speech model loaded and microphone off**. Click the creature or `[🔍 REVIEW TEXT]` to capture your current text box or highlighted text on screen and get clickable word-choice swaps, sound-alikes, and 1-click sentence rewrites. |
+| **Tier 1: Lightweight Speed (`T1: PTERO`)** | ![Sky Pterodactyl](docs/images/tier1_sky_pterodactyl.png) | `small.en` (`int8_float16`) | `~0.5 GB VRAM` | **Agile & Ultra-Low Resource**: Ideal when gaming or running heavy GPU workloads while still wanting instant everyday voice dictation on a swaying prehistoric grass floor. |
+| **Tier 2: Grammarly Scribe (`T2: CULTIST`)** | ![Hooded Cultist](docs/images/tier2_hooded_cultist.png) | `medium.en` (`int8_float16`) | `~1.5 GB VRAM` | **Humanoid Robed Scribe (`[ROBE: RED]` Gungeon / `[ROBE: BLUE]` Terraria)**: A hooded arcane scribe with a levitating quill & grimoire standing on a candle-lit cobblestone altar — balanced speech recognition paired with the 4-Pillar Grammarly & Dyslexia mentor. |
+| **Tier 3: Apex Powerhouse (`T3: T-REX`)** | ![Apex Green T-Rex](docs/images/tier3_apex_green_trex.png) | `large-v3-turbo` (`int8_float16`) | `~2.0 GB VRAM` | **Maximum Speech Accuracy**: Heavyweight GPU transcription engine for technical vocabulary, complex phrasing, and long-form dictation on lush prehistoric fern turf. |
 
 ---
 

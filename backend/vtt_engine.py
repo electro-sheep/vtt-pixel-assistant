@@ -11,6 +11,7 @@ Features:
 from __future__ import annotations
 import glob
 import os
+import re
 import sys
 import time
 import threading
@@ -63,14 +64,25 @@ from dyslexia_grammar import LocalDyslexiaGrammarEngine, compute_in_place_edit
 from win32_typer import (
     apply_in_place_screen_edit,
     capture_highlighted_screen_text,
+    capture_screen_text_smart,
     set_clipboard_text,
     speak_text_aloud_async,
     window_tracker,
 )
 
-app = FastAPI(title="VTT Pixel Assistant Local Engine v3.0")
+app = FastAPI(title="VTT Pixel Assistant Local Engine v3.4")
 
 CREATURE_MODELS: Dict[str, Dict[str, Any]] = {
+    "review": {
+        "name": "Arcane Text Reviewer",
+        "tier_num": 0,
+        "tier": "Tier 0 • Pure Text Review (No VTT)",
+        "vram": "0.0 GB VRAM",
+        "model_id": "none",
+        "fallback_id": "none",
+        "compute_type": "none",
+        "role": "Tier 0: Pure Current-Text Reviewer & Suggestion Engine (No Transcription)",
+    },
     "ptero": {
         "name": "Sky Pterodactyl",
         "tier_num": 1,
@@ -221,13 +233,14 @@ class EngineState:
 
         # Active clause & full session transcript
         self.currently_typed_clause: str = ""
+        self.last_review_capture_mode: str = "live"
         self.raw_live_text: str = ""
         self.polished_live_text: str = ""
         self.session_history: List[str] = []
         self.recent_fixes: List[Dict[str, str]] = []
         self.total_words_written: int = 0
         self.total_fixes_applied: int = 0
-        self.status_message: str = "Ready! Click creature, ● REC, or press F8 to dictate."
+        self.status_message: str = "Ready! Click creature, ● REC, or 🔍 REVIEW."
         self.pet_anim_state: str = "idle"
 
         self.stream: Optional[sd.InputStream] = None
@@ -276,13 +289,79 @@ class EngineState:
         if not ui_connected:
             apply_in_place_screen_edit(backspaces, text_to_type)
 
+    def review_current_screen_text(
+        self, apply_immediately: bool = False, custom_text: str = ""
+    ) -> None:
+        if custom_text and custom_text.strip():
+            captured = custom_text.strip()
+            mode = "custom"
+        else:
+            captured, mode = capture_screen_text_smart()
+
+        if not captured or not captured.strip():
+            captured = self.polished_live_text or " ".join(self.session_history)
+            mode = "history"
+
+        if not captured or not captured.strip():
+            self.status_message = (
+                "Click inside any text box or highlight text, then click 🔍 REVIEW!"
+            )
+            return
+
+        captured = captured.strip()
+        corrected, fixes = self.grammar.process_text(captured, is_final_clause=False)
+
+        with self.lock:
+            self.raw_live_text = captured
+            self.polished_live_text = corrected
+            self.last_review_capture_mode = mode
+            if fixes:
+                self.recent_fixes = fixes[-6:]
+
+            if apply_immediately:
+                self.total_fixes_applied += len(fixes)
+                self.pet_anim_state = "fixing" if fixes else "happy"
+                self.currently_typed_clause = corrected
+            else:
+                # Non-destructive review mode: keep track of what is currently on
+                # the screen (`captured`) so clicking any word suggestion or
+                # [✓ APPLY FIXES] updates the screen cleanly from `captured` -> `new_text`!
+                self.currently_typed_clause = captured
+                self.pet_anim_state = "curious" if not fixes else "fixing"
+
+        if apply_immediately:
+            if mode == "selection":
+                self._enqueue_screen_edit(0, corrected)
+                with self.lock:
+                    self.last_review_capture_mode = "document"
+            else:
+                bs, to_type = compute_in_place_edit(captured, corrected)
+                if bs > 0 or to_type:
+                    self._enqueue_screen_edit(bs, to_type)
+            self.status_message = (
+                f"Applied {len(fixes)} fix(es) to [{window_tracker.last_external_title}]!"
+                if fixes
+                else "Reviewed text is already clean — click any word for synonyms!"
+            )
+        else:
+            word_count = len(captured.split())
+            self.status_message = (
+                f"Reviewed {word_count} words from [{window_tracker.last_external_title}] "
+                f"({len(fixes)} auto-fix(es) + word suggestions ready)!"
+            )
+
     def toggle_listening_state(self) -> None:
+        if self.active_creature == "review":
+            self.review_current_screen_text(apply_immediately=False)
+            return
+
         with self.lock:
             self.is_listening = not self.is_listening
             self.preroll_chunks.clear()
             self.audio_chunks.clear()
             self.has_voice_in_utterance = False
             self.currently_typed_clause = ""
+            self.last_review_capture_mode = "live"
             if self.is_listening:
                 self.target_selected = True
                 self.pet_anim_state = "listen"
@@ -398,6 +477,11 @@ class EngineState:
     def get_or_load_whisper(self, creature_key: str) -> Any:
         info = CREATURE_MODELS.get(creature_key, CREATURE_MODELS["stego"])
         model_id = info["model_id"]
+        if model_id == "none":
+            self.active_model_name = "No-VTT (Review Only)"
+            self.compute_backend = "0GB Local"
+            self.model_loading = False
+            return None
         if model_id in self.loaded_models:
             self.active_model_name = model_id.split("/")[-1]
             return self.loaded_models[model_id]
@@ -418,6 +502,17 @@ class EngineState:
         if creature_key not in CREATURE_MODELS:
             creature_key = "stego"
         self.active_creature = creature_key
+        if creature_key == "review":
+            with self.lock:
+                self.is_listening = False
+                self.active_model_name = "No-VTT (Review Only)"
+                self.compute_backend = "0GB Local"
+                self.model_loading = False
+                self.pet_anim_state = "curious"
+                self.status_message = (
+                    "Pure Text Reviewer [No-VTT • 0GB] ready! Click creature or 🔍 REVIEW to inspect current text."
+                )
+            return
         threading.Thread(
             target=self._preload_creature_model, args=(creature_key,), daemon=True
         ).start()
@@ -614,6 +709,11 @@ class TypeTextReq(BaseModel):
     text: str
 
 
+class ReviewSelectionReq(BaseModel):
+    apply_immediately: bool = False
+    text: str = ""
+
+
 class ApplyRecommendationReq(BaseModel):
     original: str = ""
     replacement: str = ""
@@ -642,7 +742,7 @@ def get_status(ui: int = 0, last_edit_id: int = 0) -> Dict[str, Any]:
     )
 
     return {
-        "engine_version": "3.3",
+        "engine_version": "3.4",
         "creature": engine.active_creature,
         "creature_name": active_info["name"],
         "creature_tier": int(active_info.get("tier_num", 3)),
@@ -743,28 +843,14 @@ def analyze_text(req: TypeTextReq) -> Dict[str, Any]:
 
 
 @app.post("/review_selection")
-def review_selection() -> Dict[str, Any]:
-    selected = capture_highlighted_screen_text()
-    if not selected or not selected.strip():
-        selected = engine.polished_live_text or " ".join(engine.session_history)
-    if not selected or not selected.strip():
-        engine.status_message = (
-            "Highlight text on screen or dictate first, then click FIX!"
-        )
-        return get_status()
-
-    corrected, fixes = engine.grammar.process_text(selected, is_final_clause=False)
-    engine.raw_live_text = selected
-    engine.polished_live_text = corrected
-    if fixes:
-        engine.recent_fixes = fixes[-6:]
-        engine.total_fixes_applied += len(fixes)
-        engine.pet_anim_state = "fixing"
-        engine._enqueue_screen_edit(0, corrected)
-        engine.status_message = f"Applied {len(fixes)} dyslexia/grammar fix(es)!"
-    else:
-        engine.pet_anim_state = "happy"
-        engine.status_message = "No spelling or homophone errors found!"
+def review_selection(
+    req: Optional[ReviewSelectionReq] = None,
+) -> Dict[str, Any]:
+    apply_now = req.apply_immediately if req is not None else False
+    custom_txt = req.text if req is not None else ""
+    engine.review_current_screen_text(
+        apply_immediately=apply_now, custom_text=custom_txt
+    )
     return get_status()
 
 
@@ -825,32 +911,41 @@ def apply_recommendation(req: ApplyRecommendationReq) -> Dict[str, Any]:
         if new_text:
             new_text = new_text[0].upper() + new_text[1:]
 
+        screen_baseline = engine.currently_typed_clause
+        capture_mode = engine.last_review_capture_mode
+
         engine.polished_live_text = new_text
+        engine.raw_live_text = new_text
         if engine.session_history and engine.session_history[-1] == old_text:
             engine.session_history[-1] = new_text
         engine.total_fixes_applied += 1
         engine.recent_fixes.append(
             {
-                "original": req.original or old_text,
+                "original": req.original or (screen_baseline or old_text),
                 "replacement": req.replacement,
                 "reason": "Applied word-choice / rewrite upgrade on page",
                 "category": "clarity",
             }
         )
         engine.recent_fixes = engine.recent_fixes[-6:]
-        in_live_clause = engine.currently_typed_clause == old_text
-        if in_live_clause:
-            engine.currently_typed_clause = new_text
+        engine.currently_typed_clause = new_text
+        if capture_mode == "selection":
+            engine.last_review_capture_mode = "document"
 
-    if in_live_clause:
-        bs, to_type = compute_in_place_edit(old_text, new_text)
+    if capture_mode == "selection":
+        bs, to_type = 0, new_text
+    elif screen_baseline:
+        bs, to_type = compute_in_place_edit(screen_baseline, new_text)
     else:
         bs, to_type = compute_in_place_edit(old_text + " ", new_text + " ")
+        with engine.lock:
+            engine.currently_typed_clause = ""
+
     if bs > 0 or to_type:
         engine.pet_anim_state = "fixing"
         engine._enqueue_screen_edit(bs, to_type)
         engine.status_message = (
-            f"Helper upgraded: \"{req.original or 'sentence'}\" → \"{req.replacement}\""
+            f"Helper upgraded: \"{req.original or 'text'}\" → \"{req.replacement}\""
         )
     return get_status()
 

@@ -20,6 +20,9 @@ KEYEVENTF_UNICODE = 0x0004
 VK_BACK = 0x08
 VK_RETURN = 0x0D
 VK_CONTROL = 0x11
+VK_END = 0x23
+VK_RIGHT = 0x27
+VK_A = 0x41
 VK_C = 0x43
 VK_V = 0x56
 VK_F8 = 0x77
@@ -365,18 +368,96 @@ def set_clipboard_text(text: str) -> None:
         pass
 
 
+def empty_clipboard() -> None:
+    """Clear the Windows clipboard so we can detect fresh Ctrl+C copies."""
+    try:
+        if user32.OpenClipboard(None):
+            try:
+                user32.EmptyClipboard()
+            finally:
+                user32.CloseClipboard()
+    except Exception:
+        pass
+
+
 def capture_highlighted_screen_text() -> str:
     """Focus external window, send Ctrl+C, and return the copied text."""
+    text, _ = capture_screen_text_smart()
+    return text
+
+
+def capture_screen_text_smart() -> Tuple[str, str]:
+    """
+    Captures the current text from the active external window without needing voice transcription:
+    1. First tries `Ctrl+C` to grab any highlighted text selection (`mode = 'selection'`).
+    2. If nothing was highlighted, automatically sends `Ctrl+A` -> `Ctrl+C` -> `Right Arrow`
+       to read the current text box / document (`mode = 'document'`).
+    3. Falls back to existing clipboard text if the window has no selectable text (`mode = 'clipboard'`).
+    """
+    prev_clip = get_clipboard_text()
+    empty_clipboard()
     window_tracker.ensure_external_focused()
-    inputs = [
+
+    # Step 1: Try copying highlighted selection (Ctrl+C)
+    copy_inputs = [
         _make_vk_input(VK_CONTROL, key_up=False),
         _make_vk_input(VK_C, key_up=False),
         _make_vk_input(VK_C, key_up=True),
         _make_vk_input(VK_CONTROL, key_up=True),
     ]
+    _send_input_batch(copy_inputs)
+    time.sleep(0.075)
+    selected_text = get_clipboard_text().strip()
+    if selected_text:
+        return selected_text, "selection"
+
+    # Step 2: Nothing highlighted — capture the current text box/document via Ctrl+A, Ctrl+C, Right Arrow
+    select_all_copy = [
+        _make_vk_input(VK_CONTROL, key_up=False),
+        _make_vk_input(VK_A, key_up=False),
+        _make_vk_input(VK_A, key_up=True),
+        _make_vk_input(VK_CONTROL, key_up=True),
+    ]
+    _send_input_batch(select_all_copy)
+    time.sleep(0.035)
+    _send_input_batch(copy_inputs)
+    time.sleep(0.075)
+    # Deselect with Right Arrow so we don't leave a giant blue highlight across the user's page
+    deselect_inputs = [
+        _make_vk_input(VK_RIGHT, key_up=False),
+        _make_vk_input(VK_RIGHT, key_up=True),
+    ]
+    _send_input_batch(deselect_inputs)
+    doc_text = get_clipboard_text().strip()
+    if doc_text:
+        return doc_text, "document"
+
+    # Step 3: Restore and fall back to previous clipboard if nothing was copied
+    if prev_clip:
+        set_clipboard_text(prev_clip)
+        return prev_clip.strip(), "clipboard"
+    return "", "none"
+
+
+def replace_entire_document_text(new_text: str) -> None:
+    """
+    Replaces the entire text in the active external text box/document via Ctrl+A -> Ctrl+V.
+    """
+    if not new_text:
+        return
+    window_tracker.ensure_external_focused()
+    set_clipboard_text(new_text)
+    time.sleep(0.010)
+    inputs = [
+        _make_vk_input(VK_CONTROL, key_up=False),
+        _make_vk_input(VK_A, key_up=False),
+        _make_vk_input(VK_A, key_up=True),
+        _make_vk_input(VK_V, key_up=False),
+        _make_vk_input(VK_V, key_up=True),
+        _make_vk_input(VK_CONTROL, key_up=True),
+    ]
     _send_input_batch(inputs)
-    time.sleep(0.09)
-    return get_clipboard_text()
+    time.sleep(0.028)
 
 
 def speak_text_aloud_async(text: str) -> None:

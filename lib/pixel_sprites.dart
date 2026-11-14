@@ -121,9 +121,17 @@ class HighResPixelGenerator {
       case 'cultist_lunar':
         return _buildLunaticCultist(
             animState, tick, audioLevel, lookDx, lookDy);
+      case 'review':
       case 'cultist':
       case 'monster':
-        return _buildEmberCultist(animState, tick, audioLevel, lookDx, lookDy);
+        return _buildEmberCultist(
+          animState,
+          tick,
+          audioLevel,
+          lookDx,
+          lookDy,
+          isReviewerMode: creature == 'review',
+        );
       case 'ptero':
       case 'stego':
       default:
@@ -142,8 +150,9 @@ class HighResPixelGenerator {
     int tick,
     double audioLevel,
     double lookDx,
-    double lookDy,
-  ) {
+    double lookDy, {
+    bool isReviewerMode = false,
+  }) {
     final buf = PixelBuffer(kGridW, kGridH);
 
     // Exact Indie-Game Palette matched to Reference Image 1
@@ -331,17 +340,32 @@ class HighResPixelGenerator {
     buf.fillRect(bookX + 6, bookY + 1, (inkTick % 3) + 1, 1, emeraldGem);
     buf.fillRect(bookX + 2, bookY + 2, (inkTick % 4) + 1, 1, eyeCyanTop);
 
-    // Enchanted Quill scribbling on the grimoire
-    final int qx = (isListen || isTyping || isFixing || isCurious)
-        ? (bookX + 2 + (tick % 7))
-        : (bookX + 6);
-    final int qy = bookY - 1 - ((isListen && tick % 2 == 0) ? 1 : 0);
-    buf.setPx(qx, qy + 1, goldBright);
-    buf.drawLine(qx, qy, qx + 4, qy - 5, quillCyan);
-    buf.drawLine(qx + 1, qy - 1, qx + 5, qy - 5, eyeWhiteBot);
+    // Enchanted Quill or Arcane Magnifying Lens inspecting the grimoire
+    if (isReviewerMode) {
+      final int lensX = bookX + 3 + ((tick ~/ 2) % 5);
+      final int lensY = bookY - 2;
+      buf.drawOvalFilled(lensX, lensY, 3, 3, goldBright);
+      buf.drawOvalFilled(lensX, lensY, 2, 2, eyeCyanTop);
+      buf.setPx(lensX - 1, lensY - 1, eyeWhiteBot);
+      buf.drawLine(lensX + 2, lensY + 2, lensX + 5, lensY + 5, goldMid);
+    } else {
+      final int qx = (isListen || isTyping || isFixing || isCurious)
+          ? (bookX + 2 + (tick % 7))
+          : (bookX + 6);
+      final int qy = bookY - 1 - ((isListen && tick % 2 == 0) ? 1 : 0);
+      buf.setPx(qx, qy + 1, goldBright);
+      buf.drawLine(qx, qy, qx + 4, qy - 5, quillCyan);
+      buf.drawLine(qx + 1, qy - 1, qx + 5, qy - 5, eyeWhiteBot);
+    }
 
     buf.applyPixelOutline(outline);
-    _drawActivePropsAndParticles(buf, 'cultist', animState, tick, audioLevel);
+    _drawActivePropsAndParticles(
+      buf,
+      isReviewerMode ? 'review' : 'cultist',
+      animState,
+      tick,
+      audioLevel,
+    );
     return buf;
   }
 
@@ -894,6 +918,7 @@ class HighResPixelGenerator {
   ) {
     final bool isCultist = creature == 'cultist' ||
         creature == 'cultist_lunar' ||
+        creature == 'review' ||
         creature == 'monster';
 
     // A. Snappy Game Footstep Dust Kick-Up during Walk
@@ -1034,6 +1059,7 @@ class HighResPixelGenerator {
     final buf = PixelBuffer(kFloorW, kFloorH);
     final bool isCultist = creature == 'cultist' ||
         creature == 'cultist_lunar' ||
+        creature == 'review' ||
         creature == 'monster';
 
     if (isCultist) {

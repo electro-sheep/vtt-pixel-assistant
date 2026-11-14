@@ -244,10 +244,28 @@ def test_pending_edits_queue_and_recommendation_application():
     assert st2["pending_edits"][0]["text"] == "excellent"
 
 
-def test_engine_endpoints_and_3_tier_progression():
+def test_engine_endpoints_and_4_option_tier_progression():
     status = vtt_engine.get_status()
-    assert status["engine_version"] == "3.3"
+    assert status["engine_version"] == "3.4"
     assert "grammarly_report" in status
+
+    # Tier 0: Pure Text Reviewer (No Transcription / 0GB VRAM)
+    s0 = vtt_engine.switch_creature(vtt_engine.CreatureSwitchReq(creature="review"))
+    assert s0["creature_tier"] == 0
+    assert s0["creature_name"] == "Arcane Text Reviewer"
+    assert s0["model_name"] == "No-VTT (Review Only)"
+    assert s0["is_listening"] is False
+
+    # Test Pure Text Review (apply_immediately=False: non-destructive review + suggestions)
+    rev_res = vtt_engine.review_selection(
+        vtt_engine.ReviewSelectionReq(
+            apply_immediately=False,
+            text="their going to basically make a big change",
+        )
+    )
+    assert rev_res["raw_live_text"] == "their going to basically make a big change"
+    assert "They're" in rev_res["polished_live_text"]
+    assert len(rev_res["grammarly_report"]["word_explorations"]) >= 5
 
     # Tier 1: Pterodactyl
     s1 = vtt_engine.switch_creature(vtt_engine.CreatureSwitchReq(creature="ptero"))
