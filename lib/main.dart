@@ -151,8 +151,8 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     _ensureBackendStarted();
     _scratchpadController.addListener(_onScratchpadChanged);
 
-    // 55ms high-fluidity active game animation & AI behavior loop
-    _animTimer = Timer.periodic(const Duration(milliseconds: 55), (_) {
+    // 45ms high-fluidity active game animation & AI behavior loop (~22 FPS)
+    _animTimer = Timer.periodic(const Duration(milliseconds: 45), (_) {
       _onAnimationTick();
     });
 
@@ -646,22 +646,33 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
         }
 
         if (_autonomousAction == 'walk') {
-          // Creature walks back and forth ON TOP of its terrain floor box!
-          final double step = 1.85 * _walkDirection;
-          _petX += step;
-          _facingLeft = _walkDirection < 0;
-
+          // Creature walks back and forth ON TOP of its terrain floor box with
+          // natural footstep push-off cadence & smooth edge deceleration!
           final double minX = _floorX + 10.0;
           final double maxX =
               math.max(minX + 10.0, _floorX + _floorWidth - _petWidth - 10.0);
+          final double distToEdge = _walkDirection > 0
+              ? (maxX - _petX).clamp(0.0, 28.0)
+              : (_petX - minX).clamp(0.0, 28.0);
+          final double edgeEase = 0.45 + 0.55 * (distToEdge / 28.0);
+          final double cadence =
+              0.75 + 0.45 * math.sin((_animTick % 6) * (math.pi / 6.0));
+          final double step = 1.75 * cadence * edgeEase * _walkDirection;
+          _petX += step;
+          _facingLeft = _walkDirection < 0;
+
           if (_petX <= minX) {
             _petX = minX;
             _walkDirection = 1.0;
             _facingLeft = false;
+            _autonomousAction = 'curious';
+            _behaviorCounter = 24;
           } else if (_petX >= maxX) {
             _petX = maxX;
             _walkDirection = -1.0;
             _facingLeft = true;
+            _autonomousAction = 'curious';
+            _behaviorCounter = 24;
           }
         }
       } else if (!_roamingEnabled) {
