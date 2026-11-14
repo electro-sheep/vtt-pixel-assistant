@@ -501,3 +501,113 @@ def test_status_reports_live_clean_and_fix_events():
     after = vtt_engine.get_status()
     assert after["fix_event_id"] > before["fix_event_id"]
     assert after["latest_fix"]["replacement"] in ("receive", "I")
+
+
+# ---------------------------------------------------------------------------
+# Rule-level review fixes: punctuation, lists, real-word mix-ups, verb forms
+# ---------------------------------------------------------------------------
+
+
+def _typed(text: str) -> str:
+    return LocalDyslexiaGrammarEngine().process_text(
+        text, is_final_clause=True, source="typed"
+    )[0]
+
+
+def _voice(text: str) -> str:
+    return LocalDyslexiaGrammarEngine().process_text(
+        text, is_final_clause=True, source="voice"
+    )[0]
+
+
+def test_meant_repeats_and_numbers_are_not_collapsed():
+    assert "twenty twenty five" in _voice("in may twenty twenty five we met")
+    assert _voice("i i i want to to go there") == "I want to go there."
+    assert "had had" in _typed("she had had enough")
+
+
+def test_irregular_verbs_beat_the_nearest_dictionary_word():
+    assert _typed("i payed with my card") == "I paid with my card."
+    assert _typed("she teached me and i catched it") == "She taught me and I caught it."
+
+
+def test_punctuation_spacing_and_comma_apostrophe_slips():
+    assert _typed("i will try .i hope it,s ok , thanks") == (
+        "I will try. I hope it's ok, thanks."
+    )
+    assert _typed("its good.but maybe not ?yes") == "It's good. But maybe not? Yes."
+    # things that only look like punctuation mistakes are left exactly as typed
+    kept = _typed("see main.dart and www.site.com/page?id=1 at 3.5 or 1,000")
+    for literal in ("main.dart", "www.site.com/page?id=1", "3.5", "1,000"):
+        assert literal in kept
+
+
+def test_lists_and_lines_keep_their_shape():
+    out = _typed("shopping list\n- milk\n- two eggs")
+    assert out == "Shopping list\n- Milk\n- Two eggs"  # no full stop on a bullet
+    assert _typed("  indented line\n    deeper line") == "Indented line\n    Deeper line."
+
+
+def test_real_word_mix_ups_with_clear_context():
+    assert _typed("i dont no if we went too the park") == (
+        "I don't know if we went to the park."
+    )
+    assert _typed("the letter was form the bank") == "The letter was from the bank."
+    assert _typed("i need to by some milk") == "I need to buy some milk."
+    assert _typed("i didnt of time") == "I didn't have time."
+    # ...and the same words used correctly are untouched
+    safe = "We walk by the river and by the way I have no idea how atoms form the bond."
+    assert _typed(safe) == safe
+
+
+def test_word_order_slips_for_small_words():
+    assert _typed("i want to go the to shop") == "I want to go to the shop."
+    assert _typed("it is one the of best") == "It is one of the best."
+
+
+def test_verb_forms_and_agreement():
+    assert _typed("i should of went and we seen a dog") == (
+        "I should have gone and we saw a dog."
+    )
+    assert _typed("I has a cat and they is cute and she have a hat") == (
+        "I have a cat and they are cute and she has a hat."
+    )
+    safe = "Does he have it? One of you is wrong. Have they seen it?"
+    assert _typed(safe) == safe
+
+
+def test_a_an_by_sound():
+    assert _typed("a elephant and an dog with a hour to spare") == (
+        "An elephant and a dog with an hour to spare."
+    )
+    safe = "A user met an FBI agent at a one off event in a European university."
+    assert _typed(safe) == safe
+
+
+def test_final_punctuation_judges_the_last_sentence_only():
+    assert _typed("can you come? i have a idea") == "Can you come? I have an idea."
+
+
+@needs_spellcheck
+def test_names_days_and_places_get_capitals():
+    assert _typed("see you on monday in london") == "See you on Monday in London."
+
+
+def test_spoken_formatting_commands():
+    assert _voice(
+        "open quote hello close quote she said new paragraph next point colon first item"
+    ) == '"Hello" she said\n\nNext point: first item.'
+    assert _voice("we could, you know, go home") == "We could go home."
+    assert _voice("hello new line how are you") == "Hello\nHow are you?"
+
+
+def test_dictation_chunks_are_stitched_into_sentences():
+    g = LocalDyslexiaGrammarEngine()
+    out, still_open = [], False
+    for chunk in ["So.", "The thing is.", "We need to.", "Finish this.", "I agree."]:
+        text, _ = g.process_text(chunk, is_final_clause=True, source="voice")
+        text, still_open = g.join_dictated_clause(text, still_open, True)
+        out.append(text)
+    assert " ".join(out) == "So the thing is we need to finish this. I agree."
+    # a mid-clause (not final) chunk never loses its full stop early
+    assert g.join_dictated_clause("We need to.", False, False) == ("We need to.", False)

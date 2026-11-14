@@ -17,7 +17,132 @@ import re
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
 
-from typo_fixer import SmartTypoFixer, WORD_RE, is_checkable_token
+from typo_fixer import (
+    COMMON_WORD_RANK,
+    SmartTypoFixer,
+    WORD_RE,
+    is_checkable_token,
+)
+
+# ---------------------------------------------------------------------------
+# Small helpers for the contextual rules
+# ---------------------------------------------------------------------------
+
+def _keep_case(source: str, target: str) -> str:
+    return target.capitalize() if source[:1].isupper() else target
+
+
+def _guarded(m: "re.Match", blocked_leads: set, replacement: str) -> str:
+    """Apply `replacement` unless the word before the match makes it valid as is
+    (e.g. "does he have", "one of you is", "have they seen")."""
+    lead = m.group(1)
+    if lead:
+        low = lead.lower().strip(".,;:!?\"'()")
+        if low in blocked_leads or low.endswith("n't"):
+            return m.group(0)
+        return f"{lead} {replacement}"
+    return replacement
+
+
+_PARTICIPLES = {
+    "went": "gone", "ate": "eaten", "wrote": "written", "took": "taken",
+    "came": "come", "did": "done", "ran": "run", "began": "begun",
+    "drank": "drunk", "broke": "broken", "spoke": "spoken", "chose": "chosen",
+    "gave": "given", "saw": "seen", "fell": "fallen", "drove": "driven",
+    "rode": "ridden", "sang": "sung", "swam": "swum", "threw": "thrown",
+    "knew": "known", "grew": "grown", "flew": "flown", "wore": "worn",
+    "tore": "torn", "stole": "stolen", "froze": "frozen", "woke": "woken",
+    "shook": "shaken",
+}
+_PERFECT_LEADS = {
+    "have", "has", "had", "having", "be", "been", "being", "is", "are", "was",
+    "were", "get", "got", "gets", "i've", "we've", "you've", "they've",
+}
+_BARE_VERB_LEADS = {
+    "do", "does", "did", "can", "could", "will", "would", "should", "shall",
+    "may", "might", "must", "let", "lets", "let's", "make", "made", "makes",
+    "help", "see", "saw", "watch", "to", "if", "that", "rather",
+}
+# "a" stays "a" before a vowel LETTER with a consonant SOUND, or a function word
+_A_KEEP = re.compile(
+    r"^(?:uni|use|usu|uti|eur|ubiq|ura|uke|ewe|one$|once$|ones$|user|"
+    r"and$|or$|in$|is$|at$|on$|of$|if$|as$|are$|it$|its$|into$|onto$|up$|us$|"
+    r"either$|each$|every$|all$|any$|also$|only$|even$|after$|about$|above$|"
+    r"across$|around$|among$|until$|under$|unless$|over$|out$|off$|other)",
+    re.IGNORECASE,
+)
+_AN_KEEP = re.compile(r"^(?:hour|honest|honor|honour|heir|herb)", re.IGNORECASE)
+
+_NUMBER_WORDS = {
+    "zero", "oh", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty",
+    "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "thousand",
+    "million", "billion", "double", "triple",
+}
+# Repeats that are meant ("had had", "twenty twenty", "no no", "bye bye")
+_REPEAT_OK = _NUMBER_WORDS | {"had", "that", "very", "so", "no", "bye", "ha", "knock", "really", "blah", "night"}
+
+_FILE_ENDINGS = {
+    "com", "org", "net", "io", "co", "uk", "gov", "edu", "ai", "dev", "app", "txt",
+    "py", "js", "ts", "dart", "json", "md", "exe", "png", "jpg", "gif", "pdf",
+    "doc", "docx", "xls", "xlsx", "csv", "html", "css", "zip", "bat", "yaml", "yml",
+}
+_DAYS_MONTHS = re.compile(
+    r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|"
+    r"april|june|july|september|october|november|december)\b"
+)
+_AMBIGUOUS_MONTH = re.compile(
+    r"\b((?:in|of|on|since|until|by|last|next|this|early|late|mid|during|before|after)\s+)"
+    r"(march|may|august)\b(?=\s+(?:\d|the\s+\d|first|second|third|\w+th\b|"
+    + "|".join(sorted(_NUMBER_WORDS))
+    + r")|[.,!?]|\s*$)",
+    re.IGNORECASE,
+)
+# Words a finished sentence practically never ends on. If a dictated chunk ends
+# on one, the speaker only paused: don't put a full stop there.
+_DANGLING = {
+    "to", "the", "a", "an", "and", "or", "but", "so", "because", "of", "at",
+    "for", "with", "from", "by", "as", "if", "when", "while", "than", "into",
+    "my", "your", "our", "their", "his", "will", "would", "can", "could",
+    "should", "very", "really", "about", "which", "who", "that's", "it's",
+    "i'm", "we're", "they're", "you're", "we", "i", "they",
+}
+
+
+def _tidy_punctuation(text: str) -> str:
+    """Put punctuation where it belongs: no space before it, one space after it,
+    and an apostrophe where a comma was hit by mistake ("it,s")."""
+    text = re.sub(r"\b([A-Za-z]+),(s|t|re|ve|ll|d|m)\b", r"\1'\2", text)
+    text = re.sub(r"(?<=\w)[ \t]+([,!?;])", r"\1", text)
+    text = re.sub(r"(?<=\w)[ \t]+:(?=\s|$)", ":", text)
+    text = re.sub(r"(?<=\w)[ \t]+\.(?=\s|$)", ".", text)
+    # "try .i hope": the stop belongs to the word before it
+    text = re.sub(
+        r"(?<=[A-Za-z])[ \t]+\.(?=([A-Za-z']+))",
+        lambda m: "." if m.group(1).lower() in COMMON_WORD_RANK else m.group(0),
+        text,
+    )
+
+    def fix_token(m: "re.Match") -> str:
+        tok = m.group(0)
+        if re.search(r"[/\\@_=&#]|www\.|\d", tok):
+            return tok  # URL, path, e-mail, number: leave exactly as typed
+        tok = re.sub(r"([,;!?])(?=[A-Za-z])", r"\1 ", tok)
+
+        def split_stop(d: "re.Match") -> str:
+            left, right = d.group(1), d.group(2)
+            r_low = right.lower()
+            if r_low in _FILE_ENDINGS:
+                return d.group(0)
+            if (len(right) >= 2 or r_low == "i") and r_low in COMMON_WORD_RANK:
+                return f"{left}. {right}"
+            return d.group(0)
+
+        return re.sub(r"([A-Za-z']{2,})\.([A-Za-z']+)", split_stop, tok)
+
+    return re.sub(r"\S+", fix_token, text)
+
 
 
 @dataclass
@@ -216,6 +341,29 @@ class LocalDyslexiaGrammarEngine:
             "gaurantee": ("guarantee", "g-u-a in guarantee"),
             "rythm": ("rhythm", "r-h-y-t-h-m spelling"),
         }
+
+        # Regular "-ed" endings put on irregular verbs ("payed" -> "paid"). These
+        # are listed because the nearest dictionary word is usually a different
+        # verb altogether ("payed" is one letter from "played").
+        for wrong, right in {
+            "payed": "paid", "layed": "laid", "catched": "caught",
+            "buyed": "bought", "teached": "taught", "runned": "ran",
+            "thinked": "thought", "writed": "wrote", "taked": "took",
+            "comed": "came", "maked": "made", "gived": "gave", "finded": "found",
+            "telled": "told", "sayed": "said", "knowed": "knew",
+            "bringed": "brought", "choosed": "chose", "drived": "drove",
+            "eated": "ate", "falled": "fell", "feeled": "felt", "getted": "got",
+            "goed": "went", "heared": "heard", "holded": "held", "keeped": "kept",
+            "losed": "lost", "meaned": "meant", "meeted": "met", "readed": "read",
+            "selled": "sold", "sended": "sent", "sitted": "sat",
+            "sleeped": "slept", "speaked": "spoke", "spended": "spent",
+            "standed": "stood", "swimmed": "swam", "throwed": "threw",
+            "understanded": "understood", "weared": "wore", "winned": "won",
+            "builded": "built", "drawed": "drew", "growed": "grew",
+            "hurted": "hurt", "cutted": "cut", "hitted": "hit", "shutted": "shut",
+            "brang": "brought", "brung": "brought", "boughten": "bought",
+        }.items():
+            self.spelling_map[wrong] = (right, f"Irregular verb: '{right}', not '{wrong}'")
 
         # Context-Aware Homophone & Grammar Disambiguation Patterns
         self.contextual_patterns = [
@@ -481,6 +629,136 @@ class LocalDyslexiaGrammarEngine:
                 "Use verb 'make' instead of 'maker'",
                 "spelling",
             ),
+            # 20b. Real words used in place of another real word (a spell checker
+            #      can't see these, so each needs a context that makes it certain)
+            (
+                re.compile(
+                    r"\b(too)\s+(the|a|an|my|your|his|her|our|their|be|go|do|see|get|make|have)\b",
+                    re.IGNORECASE,
+                ),
+                lambda m: _keep_case(m.group(1), "to") + " " + m.group(2),
+                "Use \"to\" here ('too' means 'also' or 'excessively')",
+                "homophone",
+            ),
+            (
+                re.compile(
+                    r"\b(don't|didn't|doesn't|do not|did not|does not)\s+no\b"
+                    r"(?!\s+(?:one|body|more|longer|good|harm|way|idea|matter)\b)",
+                    re.IGNORECASE,
+                ),
+                lambda m: f"{m.group(1)} know",
+                "Use \"know\" (to understand), not \"no\"",
+                "homophone",
+            ),
+            (
+                re.compile(
+                    r"\b(I|you|we|they|to|should|would|could|might|must|will|never|already)"
+                    r"\s+no\s+(if|what|how|why|when|where|who|that|about|whether|anything|nothing|something)\b",
+                    re.IGNORECASE,
+                ),
+                lambda m: f"{m.group(1)} know {m.group(2)}",
+                "Use \"know\" (to understand), not \"no\"",
+                "homophone",
+            ),
+            (
+                re.compile(
+                    r"\b(was|is|are|were|came|come|comes|coming|got|get|went|go|going|back|away|far|"
+                    r"apart|different|message|email|letter|call|heard|hear|made|taken|took|received|"
+                    r"sent|home|\w+ed)\s+form\s+"
+                    r"(the|my|your|his|her|our|their|here|there|me|him|them|us|now|then|home|work|school)\b",
+                    re.IGNORECASE,
+                ),
+                lambda m: f"{m.group(1)} from {m.group(2)}",
+                "Swapped letters: 'from', not 'form'",
+                "spelling",
+            ),
+            (
+                re.compile(
+                    r"\b(to|can|could|will|would|should|must|might|gonna|didn't|don't|can't|won't|"
+                    r"I'll|we'll|you'll|they'll)\s+by\s+"
+                    r"(some|a|an|the|it|them|this|that|more|new|me|you|us|him|her|one|two|my|your|our)\b",
+                    re.IGNORECASE,
+                ),
+                lambda m: f"{m.group(1)} buy {m.group(2)}",
+                "Use \"buy\" (to purchase), not \"by\"",
+                "homophone",
+            ),
+            (
+                re.compile(
+                    r"\b(and|go|went|going)\s+by\s+(some|more)\b"
+                    r"(?!\s+(?:miracle|chance|means|way|measure|margin|accounts?|estimates?)\b)",
+                    re.IGNORECASE,
+                ),
+                lambda m: f"{m.group(1)} buy {m.group(2)}",
+                "Use \"buy\" (to purchase), not \"by\"",
+                "homophone",
+            ),
+            (
+                re.compile(
+                    r"\b(didn't|don't|doesn't|won't|can't|wouldn't|couldn't|shouldn't)\s+of\b",
+                    re.IGNORECASE,
+                ),
+                lambda m: f"{m.group(1)} have",
+                "Use 'have', not 'of'",
+                "homophone",
+            ),
+            # 20b-2. Two little words typed in the wrong order
+            (
+                re.compile(
+                    r"\b(go|going|goes|went|come|coming|came|get|got|back|walk|walked|"
+                    r"drive|drove|run|ran|move|moved|head|headed)\s+(the|a|my|your|our)\s+to\b",
+                    re.IGNORECASE,
+                ),
+                lambda m: f"{m.group(1)} to {m.group(2)}",
+                "Word order: 'to the', not 'the to'",
+                "grammar",
+            ),
+            (
+                re.compile(r"\b(the|a)\s+of\s+(?=[a-z])", re.IGNORECASE),
+                lambda m: "of " + m.group(1).lower() + " ",
+                "Word order: 'of the', not 'the of'",
+                "grammar",
+            ),
+            # 20c. Verb forms
+            (
+                re.compile(
+                    r"((?:\bhave|\bhas|\bhad|\bhaving|'ve))\s+(" + "|".join(_PARTICIPLES) + r")\b",
+                    re.IGNORECASE,
+                ),
+                lambda m: f"{m.group(1)} {_PARTICIPLES[m.group(2).lower()]}",
+                "After have/has/had use the past participle",
+                "grammar",
+            ),
+            (
+                re.compile(r"(?:(\S+)\s+)?\b(I|we|they|you|he|she)\s+seen\b", re.IGNORECASE),
+                lambda m: _guarded(m, _PERFECT_LEADS, f"{m.group(2)} saw"),
+                "Use \"saw\" (or \"have seen\")",
+                "grammar",
+            ),
+            (
+                re.compile(r"(?:(\S+)\s+)?\bI\s+(has|is)\b"),
+                lambda m: _guarded(
+                    m, {"letter", "the", "numeral"},
+                    "I have" if m.group(2) == "has" else "I am",
+                ),
+                "Use \"I have\" / \"I am\"",
+                "grammar",
+            ),
+            (
+                re.compile(r"(?:(\S+)\s+)?\b(they|we|you)\s+(is|has)\b", re.IGNORECASE),
+                lambda m: _guarded(
+                    m, {"of"},
+                    f"{m.group(2)} " + ("are" if m.group(3).lower() == "is" else "have"),
+                ),
+                "Use \"are\" / \"have\" with we, they and you",
+                "grammar",
+            ),
+            (
+                re.compile(r"(?:(\S+)\s+)?\b(he|she|it)\s+have\b", re.IGNORECASE),
+                lambda m: _guarded(m, _BARE_VERB_LEADS, f"{m.group(2)} has"),
+                "Use \"has\" with he, she and it",
+                "grammar",
+            ),
             # 21. Subject-verb agreement
             (
                 re.compile(r"\b(we|they|you)\s+was\b", re.IGNORECASE),
@@ -504,6 +782,29 @@ class LocalDyslexiaGrammarEngine:
                 + " "
                 + m.group(2),
                 "Use \"an\" before words starting with a vowel sound",
+                "grammar",
+            ),
+            # 22b. General a / an by the sound of the next word
+            (
+                re.compile(r"\b(a)\s+([aeiou][a-z]+)\b", re.IGNORECASE),
+                lambda m: m.group(0)
+                if _A_KEEP.match(m.group(2))
+                else _keep_case(m.group(1), "an") + " " + m.group(2),
+                "Use \"an\" before a vowel sound",
+                "grammar",
+            ),
+            (
+                re.compile(r"\b(a)\s+(hour|hours|honest|honestly|honor|honour|heir)\b", re.IGNORECASE),
+                lambda m: _keep_case(m.group(1), "an") + " " + m.group(2),
+                "Use \"an\" before a silent 'h'",
+                "grammar",
+            ),
+            (
+                re.compile(r"\b(an)\s+([b-df-hj-np-tv-z][a-z]+)\b", re.IGNORECASE),
+                lambda m: m.group(0)
+                if (m.group(2).isupper() or _AN_KEEP.match(m.group(2)))
+                else _keep_case(m.group(1), "a") + " " + m.group(2),
+                "Use \"a\" before a consonant sound",
                 "grammar",
             ),
             # 23. Grammarly Pillar 2: Clarity & Conciseness (Wordy phrase simplification)
@@ -1016,6 +1317,48 @@ class LocalDyslexiaGrammarEngine:
             "sentence_variants": sentence_variants,
         }
 
+    def join_dictated_clause(
+        self, text: str, continues_previous: bool, is_final: bool
+    ) -> Tuple[str, bool]:
+        """
+        Dictation arrives in chunks split wherever the speaker paused, and each
+        chunk comes back capitalised with a full stop: "We need to. Finish this."
+        This stitches chunks back into sentences:
+        - if the previous chunk was left open, this one starts in lower case
+          (unless it starts with "I" or a word that isn't an everyday word, which
+          is probably a name);
+        - if this chunk ends on a word no sentence ends on ("to", "the", "and"),
+          its full stop is dropped and it is reported as open.
+        Returns `(text, is_open)`.
+        """
+        if not text:
+            return text, False
+        if continues_previous:
+            first = re.match(r"[A-Za-z']+", text)
+            if first:
+                word = first.group(0)
+                low = word.lower()
+                if (
+                    word[0].isupper()
+                    and not word.isupper()
+                    and low != "i"
+                    and not low.startswith("i'")
+                    and self.typo_fixer.is_everyday_word(low)
+                ):
+                    text = text[0].lower() + text[1:]
+        is_open = False
+        if is_final and text.endswith(".") and not text.endswith(".."):
+            last = re.search(r"([A-Za-z']+)\.$", text)
+            lead_in = re.search(
+                r"\b(?:thing|point|problem|question|reason|idea|plan|issue) is\.$",
+                text,
+                re.IGNORECASE,
+            )
+            if (last and last.group(1).lower() in _DANGLING) or lead_in:
+                text = text[:-1]
+                is_open = True
+        return text, is_open
+
     def process_text(
         self,
         raw_text: str,
@@ -1067,9 +1410,20 @@ class LocalDyslexiaGrammarEngine:
                     )
                 )
 
+            # Spoken padding set off by commas: ", you know," / ", like," / ", I mean,"
+            if not is_typed:
+                text = re.sub(
+                    r",\s*(?:you know|i mean|like|sort of|kind of),\s*",
+                    " ",
+                    text,
+                    flags=re.IGNORECASE,
+                )
+
             # Collapse 2-word spoken stutters ("I think I think", "we can we can", "want to want to")
+            # (number phrases such as "twenty five twenty five" are left alone)
             phrase_dup_re = re.compile(
-                r"\b(\w+\s+\w+)\s+\1\b", re.IGNORECASE
+                r"\b(?!(?:" + "|".join(sorted(_NUMBER_WORDS)) + r"|\d+)\b)(\w+\s+\w+)\s+\1\b",
+                re.IGNORECASE,
             )
             for m in phrase_dup_re.finditer(text):
                 phrase = m.group(1)
@@ -1084,10 +1438,15 @@ class LocalDyslexiaGrammarEngine:
             text = phrase_dup_re.sub(r"\1", text)
 
             # Collapse single-word stutters ("the the", "I I", "to to")
-            dup_re = re.compile(r"\b(\w+)\s+\1\b", re.IGNORECASE)
+            # (any number of repeats: "i i i" -> "i"; meant repeats and numbers are kept)
+            dup_re = re.compile(r"\b(\w+)(?:\s+\1\b)+", re.IGNORECASE)
+
+            def _keep_repeat(word: str) -> bool:
+                return word.lower() in _REPEAT_OK or word.isdigit()
+
             for m in dup_re.finditer(text):
                 word = m.group(1)
-                if word.lower() not in ("had", "that", "very"):
+                if not _keep_repeat(word):
                     fixes.append(
                         GrammarFix(
                             original=m.group(0),
@@ -1097,9 +1456,7 @@ class LocalDyslexiaGrammarEngine:
                         )
                     )
             text = dup_re.sub(
-                lambda m: m.group(0)
-                if m.group(1).lower() in ("had", "that", "very")
-                else m.group(1),
+                lambda m: m.group(0) if _keep_repeat(m.group(1)) else m.group(1),
                 text,
             )
 
@@ -1107,10 +1464,17 @@ class LocalDyslexiaGrammarEngine:
         if not is_typed and self.rules_enabled.get("auto_punctuation", True):
             punct_replacements = [
                 (r"\s*\b(period|full stop)\b", "."),
+                (r"\s*\bsemi-?\s?colon\b", ";"),
+                (r"\s*\bcolon\b", ":"),
                 (r"\s*\bcomma\b", ","),
                 (r"\s*\bquestion mark\b", "?"),
                 (r"\s*\bexclamation (mark|point)\b", "!"),
-                (r"\s*\bnew line\b", "\n"),
+                (r"\s*\bnew paragraph\b[ \t]*", "\n\n"),
+                (r"\s*\bnew line\b[ \t]*", "\n"),
+                (r"\bopen (?:quotes?|quotation marks?)\b\s*", '"'),
+                (r"\s*\b(?:close|end) (?:quotes?|quotation marks?)\b|\s*\bunquote\b", '"'),
+                (r"\bopen (?:brackets?|parenthes[ie]s|paren)\b\s*", "("),
+                (r"\s*\bclose (?:brackets?|parenthes[ie]s|paren)\b", ")"),
             ]
             for pat, sym in punct_replacements:
                 text = re.sub(pat, sym, text, flags=re.IGNORECASE)
@@ -1243,17 +1607,44 @@ class LocalDyslexiaGrammarEngine:
                 flags=re.IGNORECASE,
             )
 
-            # Capitalize first letter of text and after sentence-ending punctuation
-            # (a live chunk may start mid-sentence, so its first letter is left alone)
-            cap_re = r"([.!?]\s+[a-z])" if is_live else r"(^\s*[a-z]|[.!?]\s+[a-z])"
-            text = re.sub(cap_re, lambda m: m.group(0).upper(), text)
+            if not is_live:
+                text = _DAYS_MONTHS.sub(lambda m: m.group(0).capitalize(), text)
+                text = _AMBIGUOUS_MONTH.sub(
+                    lambda m: m.group(1) + m.group(2).capitalize(), text
+                )
 
-        # Normalize whitespace
+        # 6b. Punctuation hygiene: spacing around , . ! ? ; : and "it,s" slips.
+        #     Done before capitalising so a rescued sentence break gets its capital.
+        if not is_live and self.rules_enabled.get("auto_punctuation", True):
+            text = _tidy_punctuation(text)
+        if is_voice:
+            text = re.sub(r"\n[ \t]+", "\n", text)
+
+        if self.rules_enabled.get("grammar_structure", True):
+            if is_live:
+                # a live chunk may start mid-sentence: leave its first letter alone
+                text = re.sub(
+                    r"([.!?]\s+[a-z])", lambda m: m.group(0).upper(), text
+                )
+            else:
+                # First letter of every sentence...
+                text = re.sub(
+                    r"([.!?][\"')\]]?\s+[a-z])", lambda m: m.group(0).upper(), text
+                )
+                # ...and of every line, including "- bullet" and "1. numbered"
+                # lines (but not lines that start with a link or file name).
+                text = re.sub(
+                    r"(?m)^([ \t]*(?:[-*•][ \t]+|\d+[.)][ \t]+)?[\"'(]?)"
+                    r"(?![a-z]+(?:://|\.[a-z]{2,4}\b|@))([a-z])",
+                    lambda m: m.group(1) + m.group(2).upper(),
+                    text,
+                )
+
+        # Normalize whitespace (indentation at the start of a line is kept)
         if is_live:
             text = lead_ws + text + trail_ws
         else:
-            text = re.sub(r" {2,}", " ", text).strip()
-            text = re.sub(r"[ \t]+([,.!?])", r"\1", text)
+            text = re.sub(r"(?<=\S) {2,}", " ", text).strip()
 
         # 7. Intelligent end-of-clause punctuation (? for questions vs . for statements)
         if (
@@ -1261,12 +1652,16 @@ class LocalDyslexiaGrammarEngine:
             and not is_live
             and self.rules_enabled.get("auto_punctuation", True)
         ):
-            if text and text[-1] not in ".!?,;:":
+            last_line = text.rsplit("\n", 1)[-1]
+            is_list_item = bool(re.match(r"[ \t]*(?:[-*•]|\d+[.)])[ \t]+", last_line))
+            if text and text[-1] not in ".!?,;:\"')" and not is_list_item:
                 question_Starters = re.compile(
                     r"^(what|where|when|why|how|who|whom|whose|which|can\s+(?:i|you|we|they)|could\s+(?:i|you|we|they)|should\s+(?:i|you|we|they)|would\s+(?:i|you|we|they)|do\s+(?:i|you|we|they)|does\s+(?:it|he|she)|did\s+(?:i|you|we|they)|is\s+(?:it|this|that|there)|are\s+(?:you|we|they|there))\b",
                     re.IGNORECASE,
                 )
-                if question_Starters.search(text):
+                # Judge only the final sentence, not how the whole text began.
+                last_sentence = re.split(r"[.!?]\s+|\n", text)[-1]
+                if question_Starters.search(last_sentence):
                     text += "?"
                 else:
                     text += "."

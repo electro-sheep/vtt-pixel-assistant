@@ -16,6 +16,7 @@ import re
 import sys
 import time
 import threading
+import traceback
 from typing import Dict, Any, List, Optional
 
 
@@ -252,6 +253,10 @@ class EngineState:
         # back exactly and Backspace counts stay correct.
         self.review_lead: str = ""
         self.review_trail: str = ""
+        # True when the last dictated chunk ended mid-sentence (speaker paused),
+        # so the next chunk continues it instead of starting a new sentence.
+        self.prev_clause_open: bool = False
+        self._last_loop_error: str = ""
         # Every applied fix bumps this so the UI can pop a "teh → the" toast.
         self.fix_event_id: int = 0
         self.latest_fix: Dict[str, str] = {}
@@ -485,6 +490,7 @@ class EngineState:
             self.currently_typed_clause = ""
             self.last_review_capture_mode = "live"
             self.review_lead = self.review_trail = ""
+            self.prev_clause_open = False
             if self.is_listening:
                 self.target_selected = True
                 self.pet_anim_state = "listen"
@@ -743,6 +749,11 @@ class EngineState:
                 corrected_text, fixes = self.grammar.process_text(
                     raw_text, is_final_clause=is_clause_done, source="voice"
                 )
+                # Stitch pause-separated chunks back into sentences: no full stop
+                # after "We need to", no capital on the chunk that continues it.
+                corrected_text, clause_open = self.grammar.join_dictated_clause(
+                    corrected_text, self.prev_clause_open, is_clause_done
+                )
                 self.polished_live_text = corrected_text
                 if fixes:
                     self.recent_fixes = fixes[-6:]
@@ -803,9 +814,16 @@ class EngineState:
                         self.audio_chunks.clear()
                         self.has_voice_in_utterance = False
                         self.currently_typed_clause = ""
+                        self.prev_clause_open = clause_open
                     self.pet_anim_state = "listen"
             except Exception as e:
                 self.status_message = f"Engine note: {str(e)[:55]}"
+                # Keep the loop alive, but don't hide what went wrong: print the
+                # full traceback once per distinct error.
+                signature = f"{type(e).__name__}: {e}"
+                if signature != self._last_loop_error:
+                    self._last_loop_error = signature
+                    traceback.print_exc()
 
 
 engine = EngineState(start_workers=not TEST_MODE)
@@ -943,6 +961,7 @@ def target_clicked(req: TargetClickReq) -> Dict[str, Any]:
         engine.target_selected = True
         engine.target_coords = {"x": req.x, "y": req.y}
         engine.currently_typed_clause = ""
+        engine.prev_clause_open = False
         if engine.is_listening:
             engine.pet_anim_state = "listen"
             engine.status_message = f"Target locked: [{win_title}] — Speak now!"

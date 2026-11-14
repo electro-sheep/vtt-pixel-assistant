@@ -84,6 +84,7 @@ please thanks thank sorry hello okay welcome definitely played letter weather wh
 """.split()
 
 _COMMON_RANK: Dict[str, int] = {}
+COMMON_WORD_RANK = _COMMON_RANK  # public alias (read-only use elsewhere)
 for _i, _w in enumerate(_COMMON_WORDS):
     _COMMON_RANK.setdefault(_w, _i)
 _TOP_CUTOFF = 420  # words ranked above this get the larger "very common" bonus
@@ -441,7 +442,25 @@ class SmartTypoFixer:
                     self._backend_ready = True
         return self._backend
 
+    def is_everyday_word(self, word: str) -> bool:
+        """True when `word` is a normal lower-case dictionary word (so a capital
+        on it is just sentence-start capitalisation, not a name like "Friday")."""
+        low = word.lower()
+        backend = self._get_backend()
+        if backend is None or not backend.available:
+            return low in _COMMON_RANK
+        if low not in self._cache:
+            bad, suggestions = backend.lookup(low)
+            self._cache[low] = self._rank(low, suggestions) if bad else None
+        return self._cache[low] is None
+
     def _rank(self, low: str, suggestions: Iterable[str]) -> Tuple[Optional[str], List[str]]:
+        # Same letters, different capitals ("london" -> "London", "iphone" ->
+        # "iPhone"): the word is a name that just needs its capital letter.
+        for sug in suggestions:
+            if sug.lower() == low and sug != low:
+                return sug, [sug]
+
         limit = _max_auto_cost(len(low))
         scored: List[Tuple[float, float, str]] = []  # (score, cost, candidate)
         for rank, sug in enumerate(suggestions):
@@ -512,7 +531,7 @@ class SmartTypoFixer:
             obvious = (
                 best is not None
                 and typo_edit_cost(low, best) <= 1.0
-                and best[0] == low[0]
+                and best[0].lower() == low[0]
             )
             if not obvious:
                 if not sentence_start:
@@ -526,11 +545,11 @@ class SmartTypoFixer:
                 return c[0].upper() + c[1:]
             return c
 
-        return TypoVerdict(
-            word=word,
-            best=recase(best) if best else None,
-            candidates=[recase(c) for c in ranked[:4]],
-        )
+        fixed = recase(best) if best else None
+        choices = [c for c in (recase(c) for c in ranked[:4]) if c != word]
+        if fixed == word or not choices:
+            return None  # already spelled (and capitalised) correctly
+        return TypoVerdict(word=word, best=fixed, candidates=choices)
 
     def fix_text(self, text: str) -> Tuple[str, List[Tuple[str, str]]]:
         """Auto-fix every confident typo in `text`. Returns (new_text, [(old, new)])."""

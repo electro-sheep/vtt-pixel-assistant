@@ -63,7 +63,7 @@ Runs 100% locally in `< 1 ms` with zero cloud calls and zero extra VRAM:
 ## 🚀 Quick Start
 
 ```powershell
-# 1. Run backend unit tests (24 tests)
+# 1. Run backend unit tests (36 tests)
 pytest tests/test_backend.py -v
 
 # 2. Run Flutter static analysis & widget tests
