@@ -10,6 +10,7 @@ Features:
 
 from __future__ import annotations
 import glob
+import json
 import os
 import re
 import sys
@@ -61,6 +62,8 @@ import uvicorn
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dyslexia_grammar import LocalDyslexiaGrammarEngine, compute_in_place_edit
+from live_cleaner import LiveCleaner
+from typo_fixer import SmartTypoFixer
 from win32_typer import (
     apply_in_place_screen_edit,
     capture_highlighted_screen_text,
@@ -70,7 +73,13 @@ from win32_typer import (
     window_tracker,
 )
 
-app = FastAPI(title="VTT Pixel Assistant Local Engine v3.4")
+ENGINE_VERSION = "3.5"
+TEST_MODE = os.environ.get("VTT_TEST_MODE") == "1"
+SETTINGS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "user_settings.json"
+)
+
+app = FastAPI(title=f"VTT Pixel Assistant Local Engine v{ENGINE_VERSION}")
 
 CREATURE_MODELS: Dict[str, Dict[str, Any]] = {
     "review": {
@@ -205,7 +214,12 @@ def is_whisper_hallucination(text: str) -> bool:
 class EngineState:
     def __init__(self, start_workers: bool = True) -> None:
         self.lock = threading.Lock()
-        self.grammar = LocalDyslexiaGrammarEngine()
+        # Personal dictionary + Live Clean preference persist next to the backend
+        # (never during tests).
+        self.settings_path: Optional[str] = None if TEST_MODE else SETTINGS_PATH
+        self.grammar = LocalDyslexiaGrammarEngine(
+            SmartTypoFixer(settings_path=self.settings_path)
+        )
         self.active_creature: str = "trex"
         self.active_model_name: str = "large-v3-turbo"
         self.compute_backend: str = "CUDA"
@@ -234,6 +248,16 @@ class EngineState:
         # Active clause & full session transcript
         self.currently_typed_clause: str = ""
         self.last_review_capture_mode: str = "live"
+        # Whitespace that surrounded the reviewed text on screen, so edits put it
+        # back exactly and Backspace counts stay correct.
+        self.review_lead: str = ""
+        self.review_trail: str = ""
+        # Every applied fix bumps this so the UI can pop a "teh → the" toast.
+        self.fix_event_id: int = 0
+        self.latest_fix: Dict[str, str] = {}
+        self.anim_reset_at: float = 0.0
+        self._report_cache_key: Any = None
+        self._report_cache: Dict[str, Any] = {}
         self.raw_live_text: str = ""
         self.polished_live_text: str = ""
         self.session_history: List[str] = []
@@ -246,6 +270,14 @@ class EngineState:
         self.stream: Optional[sd.InputStream] = None
         self.running = True
         window_tracker.on_hotkey_f8 = self.toggle_listening_state
+        # Live Clean: fixes typos in any app as each word is finished.
+        self.live_cleaner = LiveCleaner(
+            clean_fn=lambda region: self.grammar.process_text(region, source="live"),
+            on_fix=lambda fixes: self.record_fixes(fixes, verb="Cleaned"),
+            is_paused=lambda: self.is_listening,
+        )
+        if start_workers and self._load_setting("live_clean", False):
+            self.live_cleaner.start()
         if start_workers:
             self.worker_thread = threading.Thread(
                 target=self._transcription_loop, daemon=True
@@ -289,14 +321,79 @@ class EngineState:
         if not ui_connected:
             apply_in_place_screen_edit(backspaces, text_to_type)
 
+    # ---- small persisted settings -------------------------------------------
+    def _load_setting(self, key: str, default: Any) -> Any:
+        if not self.settings_path or not os.path.isfile(self.settings_path):
+            return default
+        try:
+            with open(self.settings_path, "r", encoding="utf-8") as fh:
+                return json.load(fh).get(key, default)
+        except Exception:
+            return default
+
+    def _save_setting(self, key: str, value: Any) -> None:
+        if not self.settings_path:
+            return
+        try:
+            data: Dict[str, Any] = {}
+            if os.path.isfile(self.settings_path):
+                with open(self.settings_path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            data[key] = value
+            with open(self.settings_path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+        except Exception:
+            pass
+
+    def set_live_clean(self, enabled: bool) -> bool:
+        if enabled:
+            ok = self.live_cleaner.start()
+            self.status_message = (
+                "Live Clean ON — typos are fixed as you finish each word "
+                "(Backspace right after a fix undoes it)."
+                if ok
+                else f"Live Clean could not start: {self.live_cleaner.last_error}"
+            )
+        else:
+            self.live_cleaner.stop()
+            self.status_message = "Live Clean OFF."
+        self._save_setting("live_clean", self.live_cleaner.enabled)
+        return self.live_cleaner.enabled
+
+    def record_fixes(self, fixes: List[Dict[str, str]], verb: str = "Fixed") -> None:
+        """Book-keeping shared by every path that applies fixes for the user."""
+        if not fixes:
+            return
+        last = fixes[-1]
+        with self.lock:
+            self.recent_fixes = (self.recent_fixes + list(fixes))[-6:]
+            self.total_fixes_applied += len(fixes)
+            self.fix_event_id += 1
+            self.latest_fix = {
+                "original": str(last.get("original", "")),
+                "replacement": str(last.get("replacement", "")),
+                "reason": str(last.get("reason", "")),
+                "category": str(last.get("category", "spelling")),
+                "count": str(len(fixes)),
+            }
+            self.pet_anim_state = "fixing"
+            self.anim_reset_at = time.time() + 1.6
+        self.status_message = (
+            f"{verb}: \"{last.get('original', '')}\" → \"{last.get('replacement', '')}\""
+            + (f" (+{len(fixes) - 1} more)" if len(fixes) > 1 else "")
+        )
+
     def review_current_screen_text(
         self, apply_immediately: bool = False, custom_text: str = ""
     ) -> None:
         if custom_text and custom_text.strip():
-            captured = custom_text.strip()
-            mode = "custom"
+            captured, mode = custom_text, "detached"
         else:
             captured, mode = capture_screen_text_smart()
+            if mode == "clipboard":
+                # Clipboard text is NOT what sits at the caret, so it can be
+                # previewed and improved but must never be backspaced on screen.
+                mode = "detached"
 
         if not captured or not captured.strip():
             captured = self.polished_live_text or " ".join(self.session_history)
@@ -308,46 +405,71 @@ class EngineState:
             )
             return
 
-        captured = captured.strip()
-        corrected, fixes = self.grammar.process_text(captured, is_final_clause=False)
+        body = captured.strip()
+        if mode in ("selection", "document"):
+            lead = captured[: len(captured) - len(captured.lstrip())]
+            trail = captured[len(captured.rstrip()) :]
+        elif mode == "history":
+            lead, trail = "", " "  # dictated clauses are followed by one space
+        else:
+            lead, trail = "", ""
+
+        # Typed text: fuzzy typo fixing on, spoken-punctuation words left alone.
+        corrected, fixes = self.grammar.process_text(
+            body, is_final_clause=False, source="typed"
+        )
+        on_screen = lead + body + trail
+        target = lead + corrected + trail
 
         with self.lock:
-            self.raw_live_text = captured
+            self.raw_live_text = body
             self.polished_live_text = corrected
             self.last_review_capture_mode = mode
-            if fixes:
-                self.recent_fixes = fixes[-6:]
+            self.review_lead, self.review_trail = lead, trail
+            # `currently_typed_clause` = exactly what is left of the caret right
+            # now, so a later word-swap or APPLY diffs against the real screen.
+            self.currently_typed_clause = "" if mode == "detached" else on_screen
+            if not apply_immediately:
+                if fixes:
+                    self.recent_fixes = fixes[-6:]
+                self.pet_anim_state = "curious"
+                self.anim_reset_at = time.time() + 1.6
 
-            if apply_immediately:
-                self.total_fixes_applied += len(fixes)
-                self.pet_anim_state = "fixing" if fixes else "happy"
-                self.currently_typed_clause = corrected
-            else:
-                # Non-destructive review mode: keep track of what is currently on
-                # the screen (`captured`) so clicking any word suggestion or
-                # [✓ APPLY FIXES] updates the screen cleanly from `captured` -> `new_text`!
-                self.currently_typed_clause = captured
-                self.pet_anim_state = "curious" if not fixes else "fixing"
-
-        if apply_immediately:
-            if mode == "selection":
-                self._enqueue_screen_edit(0, corrected)
-                with self.lock:
-                    self.last_review_capture_mode = "document"
-            else:
-                bs, to_type = compute_in_place_edit(captured, corrected)
-                if bs > 0 or to_type:
-                    self._enqueue_screen_edit(bs, to_type)
+        where = window_tracker.last_external_title
+        if not apply_immediately:
             self.status_message = (
-                f"Applied {len(fixes)} fix(es) to [{window_tracker.last_external_title}]!"
-                if fixes
-                else "Reviewed text is already clean — click any word for synonyms!"
+                f"Reviewed {len(body.split())} words from [{where}] — "
+                f"{len(fixes)} fix(es) ready. ✓ APPLY FIX or click a word."
             )
-        else:
-            word_count = len(captured.split())
+            return
+
+        if mode == "detached":
+            self.record_fixes(fixes)
             self.status_message = (
-                f"Reviewed {word_count} words from [{window_tracker.last_external_title}] "
-                f"({len(fixes)} auto-fix(es) + word suggestions ready)!"
+                f"Cleaned {len(fixes)} thing(s) in the preview — INSERT to paste it."
+                if fixes
+                else "Text is already clean — click any word for alternatives!"
+            )
+            return
+
+        if mode == "selection":
+            # The selection is still highlighted: pasting replaces it in one go.
+            self._enqueue_screen_edit(0, target)
+        else:
+            bs, to_type = compute_in_place_edit(on_screen, target)
+            if bs > 0 or to_type:
+                self._enqueue_screen_edit(bs, to_type)
+        with self.lock:
+            self.currently_typed_clause = target
+            self.last_review_capture_mode = "document"
+        if fixes:
+            self.record_fixes(fixes)
+            self.status_message = f"Applied {len(fixes)} fix(es) to [{where}]!"
+        else:
+            self.pet_anim_state = "happy"
+            self.anim_reset_at = time.time() + 1.6
+            self.status_message = (
+                "Reviewed text is already clean — click any word for synonyms!"
             )
 
     def toggle_listening_state(self) -> None:
@@ -362,6 +484,7 @@ class EngineState:
             self.has_voice_in_utterance = False
             self.currently_typed_clause = ""
             self.last_review_capture_mode = "live"
+            self.review_lead = self.review_trail = ""
             if self.is_listening:
                 self.target_selected = True
                 self.pet_anim_state = "listen"
@@ -618,7 +741,7 @@ class EngineState:
 
                 # Compute Point A (the polished Yellow Box text) immediately
                 corrected_text, fixes = self.grammar.process_text(
-                    raw_text, is_final_clause=is_clause_done
+                    raw_text, is_final_clause=is_clause_done, source="voice"
                 )
                 self.polished_live_text = corrected_text
                 if fixes:
@@ -668,7 +791,13 @@ class EngineState:
                         if corrected_text:
                             self.session_history.append(corrected_text)
                             self.total_words_written += len(corrected_text.split())
-                            self.total_fixes_applied += len(fixes)
+                            if fixes:
+                                self.total_fixes_applied += len(fixes)
+                                self.fix_event_id += 1
+                                self.latest_fix = {
+                                    k: str(v) for k, v in fixes[-1].items()
+                                }
+                                self.latest_fix["count"] = str(len(fixes))
                             if len(self.session_history) > 25:
                                 self.session_history = self.session_history[-25:]
                         self.audio_chunks.clear()
@@ -679,9 +808,7 @@ class EngineState:
                 self.status_message = f"Engine note: {str(e)[:55]}"
 
 
-engine = EngineState(
-    start_workers=(os.environ.get("VTT_TEST_MODE") != "1")
-)
+engine = EngineState(start_workers=not TEST_MODE)
 
 
 class CreatureSwitchReq(BaseModel):
@@ -737,12 +864,31 @@ def get_status(ui: int = 0, last_edit_id: int = 0) -> Dict[str, Any]:
         engine.active_creature, CREATURE_MODELS["trex"]
     )
     eval_text = engine.polished_live_text or " ".join(engine.session_history[-3:])
-    grammarly_report = engine.grammar.generate_grammarly_recommendations(
-        eval_text, recent_fixes_count=len(engine.recent_fixes)
+    # The UI polls ~6x a second; only re-analyse when something actually changed.
+    cache_key = (
+        eval_text,
+        len(engine.recent_fixes),
+        engine.grammar.typo_fixer.version,
+        tuple(sorted(engine.grammar.rules_enabled.items())),
     )
+    if cache_key != engine._report_cache_key:
+        engine._report_cache = engine.grammar.generate_grammarly_recommendations(
+            eval_text, recent_fixes_count=len(engine.recent_fixes)
+        )
+        engine._report_cache_key = cache_key
+    grammarly_report = engine._report_cache
+
+    # One-shot reactions ("fixing", "happy"...) fall back to idle on their own.
+    if (
+        not engine.is_listening
+        and engine.anim_reset_at
+        and time.time() > engine.anim_reset_at
+    ):
+        engine.pet_anim_state = "idle"
+        engine.anim_reset_at = 0.0
 
     return {
-        "engine_version": "3.4",
+        "engine_version": ENGINE_VERSION,
         "creature": engine.active_creature,
         "creature_name": active_info["name"],
         "creature_tier": int(active_info.get("tier_num", 3)),
@@ -774,6 +920,10 @@ def get_status(ui: int = 0, last_edit_id: int = 0) -> Dict[str, Any]:
             else engine.pet_anim_state
         ),
         "rules": engine.grammar.rules_enabled,
+        "live_clean": engine.live_cleaner.enabled,
+        "smart_typos_available": engine.grammar.typo_fixer.available,
+        "fix_event_id": engine.fix_event_id,
+        "latest_fix": engine.latest_fix,
         "latest_edit_id": latest_id,
         "pending_edits": pending,
     }
@@ -788,6 +938,7 @@ def toggle_listen() -> Dict[str, Any]:
 @app.post("/target_clicked")
 def target_clicked(req: TargetClickReq) -> Dict[str, Any]:
     _, win_title = window_tracker.lock_window_at_point(req.x, req.y)
+    engine.live_cleaner.notify_caret_moved()
     with engine.lock:
         engine.target_selected = True
         engine.target_coords = {"x": req.x, "y": req.y}
@@ -820,16 +971,22 @@ def set_tone(req: ToneUpdateReq) -> Dict[str, Any]:
 
 @app.post("/analyze_text")
 def analyze_text(req: TypeTextReq) -> Dict[str, Any]:
-    corrected, fixes = engine.grammar.process_text(req.text, is_final_clause=True)
-    engine.raw_live_text = req.text
-    engine.polished_live_text = corrected
+    corrected, fixes = engine.grammar.process_text(
+        req.text, is_final_clause=True, source="typed"
+    )
+    with engine.lock:
+        engine.raw_live_text = req.text
+        engine.polished_live_text = corrected
+        # Scratchpad text is not on the external screen: preview-only until typed.
+        engine.currently_typed_clause = ""
+        engine.last_review_capture_mode = "detached"
+        engine.review_lead = engine.review_trail = ""
     if fixes:
-        engine.recent_fixes = fixes[-6:]
-        engine.total_fixes_applied += len(fixes)
-        engine.pet_anim_state = "fixing"
+        engine.record_fixes(fixes)
         engine.status_message = f"Fixed {len(fixes)} issue(s) in Scratchpad!"
     else:
         engine.pet_anim_state = "happy"
+        engine.anim_reset_at = time.time() + 1.6
         engine.status_message = "Text is crystal clear!"
     return {
         "original": req.text,
@@ -856,15 +1013,22 @@ def review_selection(
 
 @app.post("/type_text")
 def type_text(req: TypeTextReq) -> Dict[str, Any]:
-    corrected, fixes = engine.grammar.process_text(req.text, is_final_clause=True)
-    engine.raw_live_text = req.text
-    engine.polished_live_text = corrected
-    if fixes:
-        engine.recent_fixes = fixes[-6:]
-        engine.total_fixes_applied += len(fixes)
-    engine.total_words_written += len(corrected.split())
+    corrected, fixes = engine.grammar.process_text(
+        req.text, is_final_clause=True, source="typed"
+    )
+    with engine.lock:
+        engine.raw_live_text = req.text
+        engine.polished_live_text = corrected
+        # What we are about to type becomes the on-screen baseline for later swaps.
+        engine.currently_typed_clause = corrected + " "
+        engine.last_review_capture_mode = "document"
+        engine.review_lead, engine.review_trail = "", " "
+        engine.total_words_written += len(corrected.split())
     engine._enqueue_screen_edit(0, corrected + " ")
-    engine.pet_anim_state = "fixing" if fixes else "typing"
+    engine.record_fixes(fixes)
+    if not fixes:
+        engine.pet_anim_state = "typing"
+        engine.anim_reset_at = time.time() + 1.6
     engine.status_message = f"Typed into [{window_tracker.last_external_title}]!"
     return get_status()
 
@@ -913,6 +1077,7 @@ def apply_recommendation(req: ApplyRecommendationReq) -> Dict[str, Any]:
 
         screen_baseline = engine.currently_typed_clause
         capture_mode = engine.last_review_capture_mode
+        target = engine.review_lead + new_text + engine.review_trail
 
         engine.polished_live_text = new_text
         engine.raw_live_text = new_text
@@ -928,14 +1093,21 @@ def apply_recommendation(req: ApplyRecommendationReq) -> Dict[str, Any]:
             }
         )
         engine.recent_fixes = engine.recent_fixes[-6:]
-        engine.currently_typed_clause = new_text
+        if capture_mode == "detached":
+            engine.currently_typed_clause = ""
+        else:
+            engine.currently_typed_clause = target
         if capture_mode == "selection":
             engine.last_review_capture_mode = "document"
 
-    if capture_mode == "selection":
-        bs, to_type = 0, new_text
+    if capture_mode == "detached":
+        # Preview-only text (scratchpad / clipboard): nothing on screen to edit.
+        bs, to_type = 0, ""
+        engine.status_message = "Preview updated — press INSERT to paste it."
+    elif capture_mode == "selection":
+        bs, to_type = 0, target
     elif screen_baseline:
-        bs, to_type = compute_in_place_edit(screen_baseline, new_text)
+        bs, to_type = compute_in_place_edit(screen_baseline, target)
     else:
         bs, to_type = compute_in_place_edit(old_text + " ", new_text + " ")
         with engine.lock:
@@ -943,10 +1115,69 @@ def apply_recommendation(req: ApplyRecommendationReq) -> Dict[str, Any]:
 
     if bs > 0 or to_type:
         engine.pet_anim_state = "fixing"
+        engine.anim_reset_at = time.time() + 1.6
         engine._enqueue_screen_edit(bs, to_type)
         engine.status_message = (
             f"Helper upgraded: \"{req.original or 'text'}\" → \"{req.replacement}\""
         )
+    return get_status()
+
+
+class CleanLiveReq(BaseModel):
+    text: str
+    caret: int = -1
+
+
+@app.post("/clean_live")
+def clean_live(req: CleanLiveReq) -> Dict[str, Any]:
+    """
+    As-you-type cleanup for the in-app scratchpad. Only finished words are
+    touched: the word the caret is still inside is left exactly as typed, and the
+    caret position is returned adjusted for whatever changed before it.
+    """
+    text = req.text
+    caret = req.caret if 0 <= req.caret <= len(text) else len(text)
+    in_progress = re.search(r"[A-Za-z']+$", text[:caret])
+    cut = in_progress.start() if in_progress else caret
+    stable, rest = text[:cut], text[cut:]
+
+    cleaned, fixes = engine.grammar.process_text(stable, source="live")
+    if engine.grammar.rules_enabled.get("grammar_structure", True):
+        first = re.search(r"[A-Za-z]", cleaned)
+        if first and cleaned[first.start()].islower():
+            i = first.start()
+            cleaned = cleaned[:i] + cleaned[i].upper() + cleaned[i + 1 :]
+
+    engine.record_fixes(fixes, verb="Cleaned")
+    return {
+        "text": cleaned + rest,
+        "caret": len(cleaned) + (caret - cut),
+        "changed": cleaned != stable,
+        "fixes": fixes,
+    }
+
+
+class LiveCleanReq(BaseModel):
+    enabled: bool
+
+
+@app.post("/set_live_clean")
+def set_live_clean(req: LiveCleanReq) -> Dict[str, Any]:
+    engine.set_live_clean(req.enabled)
+    return get_status()
+
+
+class LearnWordReq(BaseModel):
+    word: str
+
+
+@app.post("/learn_word")
+def learn_word(req: LearnWordReq) -> Dict[str, Any]:
+    """Add a word to the personal dictionary so it is never flagged again."""
+    word = req.word.strip()
+    if word:
+        engine.grammar.typo_fixer.learn_word(word)
+        engine.status_message = f"Learned \"{word}\" — I won't flag it again."
     return get_status()
 
 
@@ -977,6 +1208,7 @@ def speak_text(req: SpeakReq) -> Dict[str, Any]:
 @app.post("/shutdown")
 def shutdown_server() -> Dict[str, str]:
     engine.running = False
+    engine.live_cleaner.stop()
     threading.Timer(0.2, lambda: os._exit(0)).start()
     return {"status": "shutting_down"}
 

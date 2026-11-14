@@ -126,6 +126,15 @@ user32.GetClipboardData.restype = wintypes.HANDLE
 user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
 user32.SetClipboardData.restype = wintypes.HANDLE
 
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenProcess.restype = wintypes.HANDLE
+kernel32.QueryFullProcessImageNameW.argtypes = [
+    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+]
+kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+
 kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
 kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
 kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
@@ -258,20 +267,67 @@ class TargetWindowTracker:
 window_tracker = TargetWindowTracker()
 
 
-def _make_vk_input(vk: int, key_up: bool = False) -> INPUT:
+def _make_vk_input(vk: int, key_up: bool = False, extra_info: int = 0) -> INPUT:
     flags = KEYEVENTF_KEYUP if key_up else 0
     return INPUT(
         type=INPUT_KEYBOARD,
-        ki=KEYBDINPUT(wVk=vk, wScan=0, dwFlags=flags, time=0, dwExtraInfo=0),
+        ki=KEYBDINPUT(wVk=vk, wScan=0, dwFlags=flags, time=0, dwExtraInfo=extra_info),
     )
 
 
-def _make_unicode_input(char_code: int, key_up: bool = False) -> INPUT:
+def _make_unicode_input(
+    char_code: int, key_up: bool = False, extra_info: int = 0
+) -> INPUT:
     flags = KEYEVENTF_UNICODE | (KEYEVENTF_KEYUP if key_up else 0)
     return INPUT(
         type=INPUT_KEYBOARD,
-        ki=KEYBDINPUT(wVk=0, wScan=char_code, dwFlags=flags, time=0, dwExtraInfo=0),
+        ki=KEYBDINPUT(
+            wVk=0, wScan=char_code, dwFlags=flags, time=0, dwExtraInfo=extra_info
+        ),
     )
+
+
+def send_direct_edit(backspaces: int, text_to_type: str, extra_info: int = 0) -> None:
+    """
+    Backspace + type straight into whichever window currently has focus, as real
+    keystrokes. Unlike `apply_in_place_screen_edit` this never switches window and
+    never touches the clipboard, so it is safe for small as-you-type corrections.
+    `extra_info` tags the keystrokes so our own keyboard listener can ignore them.
+    """
+    inputs: list[INPUT] = []
+    for _ in range(max(0, backspaces)):
+        inputs.append(_make_vk_input(VK_BACK, key_up=False, extra_info=extra_info))
+        inputs.append(_make_vk_input(VK_BACK, key_up=True, extra_info=extra_info))
+    for unit in _utf16_units(text_to_type):
+        inputs.append(_make_unicode_input(unit, key_up=False, extra_info=extra_info))
+        inputs.append(_make_unicode_input(unit, key_up=True, extra_info=extra_info))
+    _send_input_batch(inputs, chunk_size=48)
+
+
+def _utf16_units(text: str) -> list[int]:
+    data = text.encode("utf-16-le")
+    return [int.from_bytes(data[i : i + 2], "little") for i in range(0, len(data), 2)]
+
+
+def get_process_name(hwnd: Optional[int]) -> str:
+    """Lower-case executable name (e.g. 'notepad.exe') that owns `hwnd`."""
+    if not hwnd:
+        return ""
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return ""
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(520)
+        size = wintypes.DWORD(520)
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value.replace("/", "\\").rsplit("\\", 1)[-1].lower()
+        return ""
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _send_input_batch(inputs: list[INPUT], chunk_size: int = 32) -> None:
@@ -407,8 +463,9 @@ def capture_screen_text_smart() -> Tuple[str, str]:
     ]
     _send_input_batch(copy_inputs)
     time.sleep(0.075)
-    selected_text = get_clipboard_text().strip()
-    if selected_text:
+    selected_text = _normalise_newlines(get_clipboard_text())
+    if selected_text.strip():
+        _restore_clipboard(prev_clip)
         return selected_text, "selection"
 
     # Step 2: Nothing highlighted — capture the current text box/document via Ctrl+A, Ctrl+C, Right Arrow
@@ -428,8 +485,9 @@ def capture_screen_text_smart() -> Tuple[str, str]:
         _make_vk_input(VK_RIGHT, key_up=True),
     ]
     _send_input_batch(deselect_inputs)
-    doc_text = get_clipboard_text().strip()
-    if doc_text:
+    doc_text = _normalise_newlines(get_clipboard_text())
+    if doc_text.strip():
+        _restore_clipboard(prev_clip)
         return doc_text, "document"
 
     # Step 3: Restore and fall back to previous clipboard if nothing was copied
@@ -437,6 +495,20 @@ def capture_screen_text_smart() -> Tuple[str, str]:
         set_clipboard_text(prev_clip)
         return prev_clip.strip(), "clipboard"
     return "", "none"
+
+
+def _normalise_newlines(text: str) -> str:
+    """Clipboard text uses CRLF, but an editor deletes a line break with ONE
+    Backspace. Counting it as two characters would over-delete on apply."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _restore_clipboard(previous: str) -> None:
+    """Put back whatever the user had on the clipboard before we captured."""
+    if previous:
+        set_clipboard_text(previous)
+    else:
+        empty_clipboard()
 
 
 def replace_entire_document_text(new_text: str) -> None:

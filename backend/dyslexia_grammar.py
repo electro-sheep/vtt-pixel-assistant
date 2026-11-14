@@ -15,7 +15,9 @@ Features:
 from __future__ import annotations
 import re
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Tuple
+from typing import List, Dict, Optional, Tuple
+
+from typo_fixer import SmartTypoFixer, WORD_RE, is_checkable_token
 
 
 @dataclass
@@ -27,10 +29,14 @@ class GrammarFix:
 
 
 class LocalDyslexiaGrammarEngine:
-    def __init__(self) -> None:
+    def __init__(self, typo_fixer: Optional[SmartTypoFixer] = None) -> None:
+        # General wrong/missing/extra/swapped-letter fixer (Windows spell checker
+        # + keyboard-aware ranking). Falls back to the static map when unavailable.
+        self.typo_fixer: SmartTypoFixer = typo_fixer or SmartTypoFixer()
         self.rules_enabled: Dict[str, bool] = {
             "homophones": True,
             "dyslexia_spelling": True,
+            "smart_typos": True,
             "speech_cleanup": True,
             "grammar_structure": True,
             "auto_punctuation": True,
@@ -772,7 +778,12 @@ class LocalDyslexiaGrammarEngine:
         """
         explorations: List[Dict[str, object]] = []
         raw_tokens = text.split()
+        # Long documents: only the most recent words are shown as clickable tokens
+        # (indexes stay absolute so a swap still lands on the right word).
+        first_shown = max(0, len(raw_tokens) - 160)
         for idx, tok in enumerate(raw_tokens):
+            if idx < first_shown:
+                continue
             m = re.match(r"^([^A-Za-z']*)([A-Za-z']+)([^A-Za-z']*)$", tok)
             if not m:
                 explorations.append(
@@ -793,7 +804,17 @@ class LocalDyslexiaGrammarEngine:
             kind = "normal"
             hint = ""
 
-            if low in self.hedging_words:
+            unsure = None
+            if self.rules_enabled.get("smart_typos", True) and is_checkable_token(
+                tok, len(prefix), len(prefix) + len(core)
+            ):
+                unsure = self.typo_fixer.check(core, sentence_start=(idx == 0))
+
+            if unsure is not None and unsure.candidates:
+                kind = "spelling"
+                hint = f"'{core}' looks misspelled — pick the word you meant:"
+                alts.extend(unsure.candidates[:4])
+            elif low in self.hedging_words:
                 kind = "hedging"
                 hint = f"Spoken hedge/filler '{core}' — drop it or swap:"
                 alts.append("[DROP]")
@@ -996,22 +1017,46 @@ class LocalDyslexiaGrammarEngine:
         }
 
     def process_text(
-        self, raw_text: str, is_final_clause: bool = False
+        self,
+        raw_text: str,
+        is_final_clause: bool = False,
+        source: str = "auto",
     ) -> Tuple[str, List[Dict]]:
         """
         Clean, disambiguate, and structure `raw_text` according to active local rules.
         Returns `(corrected_text, list_of_fix_dicts)`.
+
+        `source` says where the text came from, because spoken and typed text need
+        different cleanup:
+        - "voice": dictation. Strips fillers, honours spoken punctuation ("comma"),
+          but skips fuzzy typo fixing (Whisper doesn't make keyboard slips, and
+          names/jargon it heard correctly must not be "corrected").
+        - "typed": keyboard text. Fuzzy typo fixing on; the words "period"/"comma"
+          are left alone and "um"/"ah" are not deleted.
+        - "live":  typed text being cleaned *while the user is still typing*. Like
+          "typed" but never rewrites phrases, never re-capitalises the start of the
+          chunk, and preserves all surrounding whitespace exactly.
+        - "auto":  everything on (original behaviour).
         """
         if not raw_text or not raw_text.strip():
             return raw_text, []
 
+        is_voice = source == "voice"
+        is_live = source == "live"
+        is_typed = source in ("typed", "live")
+
         text = raw_text
+        lead_ws = trail_ws = ""
+        if is_live:
+            lead_ws = text[: len(text) - len(text.lstrip())]
+            trail_ws = text[len(text.rstrip()) :]
+            text = text.strip()
         fixes: List[GrammarFix] = []
 
         # 1. Speech cleanup: filler noises, word stutters & 2-3 word phrase stutters
         if self.rules_enabled.get("speech_cleanup", True):
             filler_re = re.compile(r"\b(um+|uh+|erm+|ah+|hmm+)\b[,\s]*", re.IGNORECASE)
-            if filler_re.search(text):
+            if not is_typed and filler_re.search(text):
                 text = filler_re.sub("", text)
                 fixes.append(
                     GrammarFix(
@@ -1059,7 +1104,7 @@ class LocalDyslexiaGrammarEngine:
             )
 
         # 2. Spoken punctuation commands
-        if self.rules_enabled.get("auto_punctuation", True):
+        if not is_typed and self.rules_enabled.get("auto_punctuation", True):
             punct_replacements = [
                 (r"\s*\b(period|full stop)\b", "."),
                 (r"\s*\bcomma\b", ","),
@@ -1094,6 +1139,25 @@ class LocalDyslexiaGrammarEngine:
 
             text = re.sub(r"\b[A-Za-z']+\b", replace_spelling, text)
 
+        # 3b. Smart typo fixing: any wrong / missing / extra / swapped letter that
+        #     has one clear correction (see typo_fixer.py). Unsure words are left
+        #     in place and offered as clickable choices in the word explorer.
+        if (
+            not is_voice
+            and self.rules_enabled.get("dyslexia_spelling", True)
+            and self.rules_enabled.get("smart_typos", True)
+        ):
+            text, typo_changes = self.typo_fixer.fix_text(text)
+            for old_word, new_word in typo_changes:
+                fixes.append(
+                    GrammarFix(
+                        original=old_word,
+                        replacement=new_word,
+                        reason=f"Typo fix ({old_word} → {new_word})",
+                        category="spelling",
+                    )
+                )
+
         # 4. Homophones, Clarity & contextual grammar disambiguation
         if (
             self.rules_enabled.get("homophones", True)
@@ -1113,8 +1177,8 @@ class LocalDyslexiaGrammarEngine:
                     "dyslexia_spelling", True
                 ):
                     continue
-                if category == "clarity" and not self.rules_enabled.get(
-                    "clarity_conciseness", True
+                if category == "clarity" and (
+                    is_live or not self.rules_enabled.get("clarity_conciseness", True)
                 ):
                     continue
                 for m in regex.finditer(text):
@@ -1132,7 +1196,7 @@ class LocalDyslexiaGrammarEngine:
                 text = regex.sub(repl_fn, text)
 
         # If writing_tone is "concise", also auto-apply all Engagement/Delivery recommendation patterns
-        if self.writing_tone == "concise":
+        if self.writing_tone == "concise" and not is_live:
             for regex, repl_fn, reason, pillar in self.recommendation_patterns:
                 for m in regex.finditer(text):
                     orig = m.group(0)
@@ -1149,8 +1213,10 @@ class LocalDyslexiaGrammarEngine:
                 text = regex.sub(repl_fn, text)
 
         # 5. Writing tone adjustments (Formal mode expands contractions)
-        if self.writing_tone == "formal" and self.rules_enabled.get(
-            "grammar_structure", True
+        if (
+            self.writing_tone == "formal"
+            and not is_live
+            and self.rules_enabled.get("grammar_structure", True)
         ):
             formal_map = [
                 (r"\bcan't\b", "cannot"),
@@ -1178,18 +1244,23 @@ class LocalDyslexiaGrammarEngine:
             )
 
             # Capitalize first letter of text and after sentence-ending punctuation
-            text = re.sub(
-                r"(^\s*[a-z]|[.!?]\s+[a-z])",
-                lambda m: m.group(0).upper(),
-                text,
-            )
+            # (a live chunk may start mid-sentence, so its first letter is left alone)
+            cap_re = r"([.!?]\s+[a-z])" if is_live else r"(^\s*[a-z]|[.!?]\s+[a-z])"
+            text = re.sub(cap_re, lambda m: m.group(0).upper(), text)
 
         # Normalize whitespace
-        text = re.sub(r" {2,}", " ", text).strip()
-        text = re.sub(r"\s+([,.!?])", r"\1", text)
+        if is_live:
+            text = lead_ws + text + trail_ws
+        else:
+            text = re.sub(r" {2,}", " ", text).strip()
+            text = re.sub(r"[ \t]+([,.!?])", r"\1", text)
 
         # 7. Intelligent end-of-clause punctuation (? for questions vs . for statements)
-        if is_final_clause and self.rules_enabled.get("auto_punctuation", True):
+        if (
+            is_final_clause
+            and not is_live
+            and self.rules_enabled.get("auto_punctuation", True)
+        ):
             if text and text[-1] not in ".!?,;:":
                 question_Starters = re.compile(
                     r"^(what|where|when|why|how|who|whom|whose|which|can\s+(?:i|you|we|they)|could\s+(?:i|you|we|they)|should\s+(?:i|you|we|they)|would\s+(?:i|you|we|they)|do\s+(?:i|you|we|they)|does\s+(?:it|he|she)|did\s+(?:i|you|we|they)|is\s+(?:it|this|that|there)|are\s+(?:you|we|they|there))\b",

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vtt_assistant/main.dart';
 import 'package:vtt_assistant/pixel_sprites.dart';
+import 'package:vtt_assistant/pixel_ui.dart';
 
 void main() {
   group('HighResPixelGenerator 3-Tier Sprite & Terrain Floor Tests', () {
@@ -108,6 +109,8 @@ void main() {
       // Clicking the flat floor bar expands it to reveal the 4-Option Mode & Tier Progression HUD
       await tester.tap(find.text('[▼ EXPAND]'));
       await tester.pump();
+      // let the drawer finish sliding open
+      await tester.pump(const Duration(milliseconds: 300));
 
       expect(find.text('T0: REVIEW'), findsOneWidget);
       expect(find.text('T1: PTERO'), findsOneWidget);
@@ -124,6 +127,8 @@ void main() {
       // Expand floor box
       await tester.tap(find.text('[▼ EXPAND]'));
       await tester.pump();
+      // let the drawer finish sliding open
+      await tester.pump(const Duration(milliseconds: 300));
 
       // Switch to Tier 0: Pure Text Reviewer (No VTT)
       await tester.tap(find.text('T0: REVIEW'));
@@ -167,6 +172,112 @@ void main() {
       expect(find.textContaining('Ember Cultist'), findsOneWidget);
       expect(find.textContaining('Lunatic Beak Cultist'), findsOneWidget);
       expect(find.textContaining('Sky Pterodactyl'), findsOneWidget);
+    });
+  });
+
+  group('Clean-as-you-go feedback', () {
+    Map<String, dynamic> status({
+      required int fixEventId,
+      bool liveClean = false,
+      Map<String, dynamic>? latestFix,
+    }) {
+      return <String, dynamic>{
+        'creature': 'review',
+        'is_listening': false,
+        'live_clean': liveClean,
+        'smart_typos_available': true,
+        'fix_event_id': fixEventId,
+        'latest_fix': latestFix ?? <String, dynamic>{},
+        'raw_live_text': 'the wron cnt',
+        'polished_live_text': 'The wrong cnt',
+        'recent_fixes': [
+          {
+            'original': 'wron',
+            'replacement': 'wrong',
+            'reason': 'Typo fix',
+            'category': 'spelling',
+          },
+        ],
+        'grammarly_report': {
+          'writing_score': 91,
+          'detected_tone': 'Direct & Clear',
+          'pillar_scores': {
+            'correctness': 98,
+            'clarity': 100,
+            'engagement': 80,
+            'delivery': 100,
+          },
+          'recommendations': <dynamic>[],
+          'sentence_variants': <dynamic>[],
+          'word_explorations': [
+            {'index': 0, 'word': 'The', 'display': 'The', 'kind': 'normal', 'alternatives': <String>[]},
+            {'index': 1, 'word': 'wrong', 'display': 'wrong', 'kind': 'normal', 'alternatives': <String>[]},
+            {'index': 2, 'word': 'cnt', 'display': 'cnt', 'kind': 'spelling', 'alternatives': ['cut', 'cant', 'cent']},
+          ],
+        },
+      };
+    }
+
+    testWidgets('A new fix pops a toast and unsure spellings offer choices + KEEP',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(const VttPixelAssistantApp());
+      await tester.tap(find.text('[▼ EXPAND]'));
+      await tester.pump();
+      // let the drawer finish sliding open
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final dynamic state = tester.state(find.byType(TransparentOverlayScreen));
+
+      // First status only sets the baseline: no toast for old fixes.
+      state.applyEngineStatus(status(fixEventId: 4));
+      await tester.pump();
+      expect(find.byType(FixToast), findsNothing);
+      expect(find.text('⚡ LIVE CLEAN: OFF'), findsOneWidget);
+
+      // The unsure word is offered as choices, with a KEEP (learn) button.
+      expect(find.textContaining('DID YOU MEAN ("cnt")'), findsOneWidget);
+      expect(find.text('cut'), findsOneWidget);
+      expect(find.text('✓ KEEP'), findsOneWidget);
+
+      // A newer fix event pops the toast and reflects Live Clean being on.
+      state.applyEngineStatus(status(
+        fixEventId: 5,
+        liveClean: true,
+        latestFix: {
+          'original': 'teh',
+          'replacement': 'the',
+          'category': 'spelling',
+          'count': '1',
+        },
+      ));
+      await tester.pump();
+      expect(find.byType(FixToast), findsOneWidget);
+      expect(find.text('teh'), findsOneWidget);
+      expect(find.text('⚡ LIVE CLEAN: ON'), findsOneWidget);
+
+      // The toast removes itself once its animation finishes.
+      await tester.pump(const Duration(milliseconds: 2700));
+      await tester.pump();
+      expect(find.byType(FixToast), findsNothing);
+    });
+
+    testWidgets('Pixel buttons fire onTap', (WidgetTester tester) async {
+      int taps = 0;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: PixelButton(
+              label: 'GO',
+              color: const Color(0xFF00E676),
+              tooltip: 'go',
+              onTap: () => taps++,
+            ),
+          ),
+        ),
+      ));
+      await tester.tap(find.text('GO'));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(taps, 1);
     });
   });
 }

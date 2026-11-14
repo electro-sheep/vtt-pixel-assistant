@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'pixel_sprites.dart';
+import 'pixel_ui.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -112,11 +113,26 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
   List<Map<String, String>> _sentenceVariants = [];
   int _selectedWordIndex = -1;
 
+  // Live Clean (fix typos as each word is finished) + visible fix feedback
+  bool _liveClean = false;
+  bool _smartTyposAvailable = true;
+  int _fixEventId = -1;
+  int _toastSeq = 0;
+  final List<_FixToastData> _toasts = [];
+  int _hopTicks = 0;
+  Timer? _padCleanTimer;
+  bool _padCleanBusy = false;
+  bool _padProgrammaticEdit = false;
+  String _lastRectsSignature = '';
+  final GlobalKey _floorKey = GlobalKey();
+  static final math.Random _rng = math.Random();
+
   String _statusMessage = 'Click creature to start transcribing (or press F8).';
   String _engineAnimState = 'idle';
   Map<String, bool> _grammarRules = {
     'homophones': true,
     'dyslexia_spelling': true,
+    'smart_typos': true,
     'speech_cleanup': true,
     'grammar_structure': true,
     'clarity_conciseness': true,
@@ -133,6 +149,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     super.initState();
     _setupWindowChannel();
     _ensureBackendStarted();
+    _scratchpadController.addListener(_onScratchpadChanged);
 
     // 55ms high-fluidity active game animation & AI behavior loop
     _animTimer = Timer.periodic(const Duration(milliseconds: 55), (_) {
@@ -149,6 +166,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
   void dispose() {
     _animTimer?.cancel();
     _statusTimer?.cancel();
+    _padCleanTimer?.cancel();
     _backendProcess?.kill();
     _spritePathController.dispose();
     _scratchpadController.dispose();
@@ -244,7 +262,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
         final Map<String, dynamic> data =
             jsonDecode(body) as Map<String, dynamic>;
 
-        if (checkVersion && data['engine_version'] != '3.4') {
+        if (checkVersion && data['engine_version'] != '3.5') {
           await _postBackend('/shutdown', {});
           await Future<void>.delayed(const Duration(milliseconds: 350));
           return false;
@@ -280,120 +298,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
         }
 
         if (!mounted) return true;
-        final String sessionText =
-            (data['session_transcript'] as String?) ?? '';
-        final String livePolished =
-            (data['polished_live_text'] as String?) ?? '';
-        final bool wasListening = _isListening;
-        final bool nowListening = (data['is_listening'] as bool?) ?? false;
-
-        setState(() {
-          _backendConnected = true;
-          _modelLoading = (data['model_loading'] as bool?) ?? false;
-          final String serverCreature =
-              (data['creature'] as String?) ?? _activeCreature;
-          _activeCreature = serverCreature;
-          if (serverCreature == 'cultist' || serverCreature == 'cultist_lunar') {
-            _cultistSkin = serverCreature;
-          }
-          _creatureName = (data['creature_name'] as String?) ?? _creatureName;
-          _creatureTier =
-              (data['creature_tier'] as num?)?.toInt() ?? _creatureTier;
-          _creatureVram = (data['creature_vram'] as String?) ?? _creatureVram;
-          _modelName = (data['model_name'] as String?) ?? _modelName;
-          _computeBackend =
-              (data['compute_backend'] as String?) ?? _computeBackend;
-          _targetWindow = (data['target_window'] as String?) ?? _targetWindow;
-          _writingTone = (data['writing_tone'] as String?) ?? _writingTone;
-          _totalWordsWritten =
-              (data['total_words_written'] as num?)?.toInt() ?? 0;
-          _totalFixesApplied =
-              (data['total_fixes_applied'] as num?)?.toInt() ?? 0;
-          _cursorX = (data['cursor_x'] as num?)?.toDouble() ?? _cursorX;
-          _cursorY = (data['cursor_y'] as num?)?.toDouble() ?? _cursorY;
-          _isListening = nowListening;
-          if (!wasListening && nowListening) {
-            _setFloorExpanded(true);
-          }
-          _audioLevel = (data['audio_level'] as num?)?.toDouble() ?? 0.0;
-          _rawLiveText = (data['raw_live_text'] as String?) ?? '';
-          _polishedLiveText = livePolished;
-          _statusMessage =
-              (data['status_message'] as String?) ?? _statusMessage;
-          _engineAnimState = (data['pet_anim_state'] as String?) ?? 'idle';
-
-          if (_isListening || _audioLevel > 0.12) {
-            _idleTicksWithoutActivity = 0;
-          }
-
-          final String combinedTranscript = [
-            if (sessionText.isNotEmpty) sessionText,
-            if (livePolished.isNotEmpty) livePolished,
-          ].join(' ');
-
-          if (combinedTranscript.isNotEmpty &&
-              combinedTranscript != _lastSyncedSessionTranscript) {
-            _lastSyncedSessionTranscript = combinedTranscript;
-            _scratchpadController.text = combinedTranscript;
-            _scratchpadController.selection = TextSelection.fromPosition(
-              TextPosition(offset: _scratchpadController.text.length),
-            );
-          }
-
-          final List<dynamic>? rawFixes =
-              data['recent_fixes'] as List<dynamic>?;
-          if (rawFixes != null) {
-            _recentFixes = rawFixes
-                .map((item) => Map<String, String>.from(
-                    (item as Map).map((k, v) => MapEntry('$k', '$v'))))
-                .toList();
-          }
-
-          final Map<String, dynamic>? grammarlyReport =
-              data['grammarly_report'] as Map<String, dynamic>?;
-          if (grammarlyReport != null) {
-            _writingScore =
-                (grammarlyReport['writing_score'] as num?)?.toInt() ?? 100;
-            _detectedTone = (grammarlyReport['detected_tone'] as String?) ??
-                'Direct & Clear';
-            final Map<String, dynamic>? pScores =
-                grammarlyReport['pillar_scores'] as Map<String, dynamic>?;
-            if (pScores != null) {
-              _pillarScores = pScores.map(
-                (k, v) => MapEntry(k, (v as num?)?.toInt() ?? 100),
-              );
-            }
-            final List<dynamic>? recs =
-                grammarlyReport['recommendations'] as List<dynamic>?;
-            if (recs != null) {
-              _grammarlyRecommendations = recs
-                  .map((item) => Map<String, String>.from(
-                      (item as Map).map((k, v) => MapEntry('$k', '$v'))))
-                  .toList();
-            }
-            final List<dynamic>? explorations =
-                grammarlyReport['word_explorations'] as List<dynamic>?;
-            if (explorations != null) {
-              _wordExplorations = explorations
-                  .map((item) => Map<String, dynamic>.from(item as Map))
-                  .toList();
-            }
-            final List<dynamic>? variants =
-                grammarlyReport['sentence_variants'] as List<dynamic>?;
-            if (variants != null) {
-              _sentenceVariants = variants
-                  .map((item) => Map<String, String>.from(
-                      (item as Map).map((k, v) => MapEntry('$k', '$v'))))
-                  .toList();
-            }
-          }
-
-          final Map<String, dynamic>? rawRules =
-              data['rules'] as Map<String, dynamic>?;
-          if (rawRules != null) {
-            _grammarRules = rawRules.map((k, v) => MapEntry(k, v == true));
-          }
-        });
+        applyEngineStatus(data);
         _syncInteractiveRects();
         return true;
       }
@@ -409,31 +314,234 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     return false;
   }
 
-  Future<void> _postBackend(String path, Map<String, dynamic> payload) async {
-    if (Platform.environment.containsKey('FLUTTER_TEST')) return;
+  /// Copies one `/status` reply from the engine into widget state.
+  @visibleForTesting
+  void applyEngineStatus(Map<String, dynamic> data) {
+    final String sessionText =
+        (data['session_transcript'] as String?) ?? '';
+    final String livePolished =
+        (data['polished_live_text'] as String?) ?? '';
+    final bool wasListening = _isListening;
+    final bool nowListening = (data['is_listening'] as bool?) ?? false;
+
+    setState(() {
+      _backendConnected = true;
+      _modelLoading = (data['model_loading'] as bool?) ?? false;
+      final String serverCreature =
+          (data['creature'] as String?) ?? _activeCreature;
+      _activeCreature = serverCreature;
+      if (serverCreature == 'cultist' || serverCreature == 'cultist_lunar') {
+        _cultistSkin = serverCreature;
+      }
+      _creatureName = (data['creature_name'] as String?) ?? _creatureName;
+      _creatureTier =
+          (data['creature_tier'] as num?)?.toInt() ?? _creatureTier;
+      _creatureVram = (data['creature_vram'] as String?) ?? _creatureVram;
+      _modelName = (data['model_name'] as String?) ?? _modelName;
+      _computeBackend =
+          (data['compute_backend'] as String?) ?? _computeBackend;
+      _targetWindow = (data['target_window'] as String?) ?? _targetWindow;
+      _writingTone = (data['writing_tone'] as String?) ?? _writingTone;
+      _totalWordsWritten =
+          (data['total_words_written'] as num?)?.toInt() ?? 0;
+      _totalFixesApplied =
+          (data['total_fixes_applied'] as num?)?.toInt() ?? 0;
+      _cursorX = (data['cursor_x'] as num?)?.toDouble() ?? _cursorX;
+      _cursorY = (data['cursor_y'] as num?)?.toDouble() ?? _cursorY;
+      _isListening = nowListening;
+      if (!wasListening && nowListening) {
+        _setFloorExpanded(true);
+      }
+      _audioLevel = (data['audio_level'] as num?)?.toDouble() ?? 0.0;
+      _rawLiveText = (data['raw_live_text'] as String?) ?? '';
+      _polishedLiveText = livePolished;
+      _statusMessage =
+          (data['status_message'] as String?) ?? _statusMessage;
+      _engineAnimState = (data['pet_anim_state'] as String?) ?? 'idle';
+
+      if (_isListening || _audioLevel > 0.12) {
+        _idleTicksWithoutActivity = 0;
+      }
+
+      final String combinedTranscript = [
+        if (sessionText.isNotEmpty) sessionText,
+        if (livePolished.isNotEmpty) livePolished,
+      ].join(' ');
+
+      if (combinedTranscript.isNotEmpty &&
+          combinedTranscript != _lastSyncedSessionTranscript) {
+        _lastSyncedSessionTranscript = combinedTranscript;
+        _setPadText(combinedTranscript, combinedTranscript.length);
+      }
+
+      final List<dynamic>? rawFixes =
+          data['recent_fixes'] as List<dynamic>?;
+      if (rawFixes != null) {
+        _recentFixes = rawFixes
+            .map((item) => Map<String, String>.from(
+                (item as Map).map((k, v) => MapEntry('$k', '$v'))))
+            .toList();
+      }
+
+      final Map<String, dynamic>? grammarlyReport =
+          data['grammarly_report'] as Map<String, dynamic>?;
+      if (grammarlyReport != null) {
+        _writingScore =
+            (grammarlyReport['writing_score'] as num?)?.toInt() ?? 100;
+        _detectedTone = (grammarlyReport['detected_tone'] as String?) ??
+            'Direct & Clear';
+        final Map<String, dynamic>? pScores =
+            grammarlyReport['pillar_scores'] as Map<String, dynamic>?;
+        if (pScores != null) {
+          _pillarScores = pScores.map(
+            (k, v) => MapEntry(k, (v as num?)?.toInt() ?? 100),
+          );
+        }
+        final List<dynamic>? recs =
+            grammarlyReport['recommendations'] as List<dynamic>?;
+        if (recs != null) {
+          _grammarlyRecommendations = recs
+              .map((item) => Map<String, String>.from(
+                  (item as Map).map((k, v) => MapEntry('$k', '$v'))))
+              .toList();
+        }
+        final List<dynamic>? explorations =
+            grammarlyReport['word_explorations'] as List<dynamic>?;
+        if (explorations != null) {
+          _wordExplorations = explorations
+              .map((item) => Map<String, dynamic>.from(item as Map))
+              .toList();
+        }
+        final List<dynamic>? variants =
+            grammarlyReport['sentence_variants'] as List<dynamic>?;
+        if (variants != null) {
+          _sentenceVariants = variants
+              .map((item) => Map<String, String>.from(
+                  (item as Map).map((k, v) => MapEntry('$k', '$v'))))
+              .toList();
+        }
+      }
+
+      final Map<String, dynamic>? rawRules =
+          data['rules'] as Map<String, dynamic>?;
+      if (rawRules != null) {
+        _grammarRules = rawRules.map((k, v) => MapEntry(k, v == true));
+      }
+
+      _liveClean = (data['live_clean'] as bool?) ?? _liveClean;
+      _smartTyposAvailable =
+          (data['smart_typos_available'] as bool?) ?? true;
+      final int fixId = (data['fix_event_id'] as num?)?.toInt() ?? 0;
+      if (_fixEventId >= 0 && fixId > _fixEventId) {
+        final Map<String, dynamic>? latestFix =
+            data['latest_fix'] as Map<String, dynamic>?;
+        if (latestFix != null) _celebrateFix(latestFix);
+      }
+      _fixEventId = fixId;
+    });
+  }
+
+  /// POSTs JSON to the local engine. Returns the decoded reply, or null on error.
+  Future<Map<String, dynamic>?> _postJson(
+    String path,
+    Map<String, dynamic> payload,
+  ) async {
+    if (Platform.environment.containsKey('FLUTTER_TEST')) return null;
     try {
       final request = await _http.postUrl(Uri.parse('$_backendBaseUrl$path'));
       request.headers.contentType = ContentType.json;
-      request.write(jsonEncode(payload));
+      request.add(utf8.encode(jsonEncode(payload)));
       final response = await request.close();
-      if (response.statusCode == 200) {
-        final String body = await response.transform(utf8.decoder).join();
-        if (path == '/analyze_text') {
-          final Map<String, dynamic> res =
-              jsonDecode(body) as Map<String, dynamic>;
-          final String? corr = res['corrected'] as String?;
-          if (corr != null && corr.isNotEmpty && mounted) {
-            setState(() {
-              _scratchpadController.text = corr;
-              _scratchpadController.selection = TextSelection.fromPosition(
-                TextPosition(offset: corr.length),
-              );
-            });
-          }
-        }
-        await _pollBackendStatus();
+      final String body = await response.transform(utf8.decoder).join();
+      if (response.statusCode != 200) return null;
+      return jsonDecode(body) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _postBackend(String path, Map<String, dynamic> payload) async {
+    final Map<String, dynamic>? res = await _postJson(path, payload);
+    if (res == null) return;
+    if (path == '/analyze_text') {
+      final String? corr = res['corrected'] as String?;
+      if (corr != null && corr.isNotEmpty && mounted) {
+        setState(() => _setPadText(corr, corr.length));
       }
-    } catch (_) {}
+    }
+    await _pollBackendStatus();
+  }
+
+  void _setPadText(String text, int caret) {
+    _padProgrammaticEdit = true;
+    _scratchpadController.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: caret.clamp(0, text.length)),
+    );
+    _padProgrammaticEdit = false;
+  }
+
+  /// Scratchpad "clean as you go": a short pause after typing sends the text to
+  /// the engine, which fixes finished words and leaves the one being typed alone.
+  void _onScratchpadChanged() {
+    if (_padProgrammaticEdit || !_showScratchpad) return;
+    _padCleanTimer?.cancel();
+    _padCleanTimer =
+        Timer(const Duration(milliseconds: 420), _cleanScratchpadLive);
+  }
+
+  Future<void> _cleanScratchpadLive() async {
+    if (_padCleanBusy || !mounted) return;
+    final TextEditingValue before = _scratchpadController.value;
+    if (before.text.trim().isEmpty ||
+        before.composing.isValid ||
+        !before.selection.isCollapsed) {
+      return;
+    }
+    _padCleanBusy = true;
+    try {
+      final Map<String, dynamic>? res = await _postJson('/clean_live', {
+        'text': before.text,
+        'caret': before.selection.isValid ? before.selection.extentOffset : -1,
+      });
+      if (res == null || !mounted || res['changed'] != true) return;
+      // Drop the result if the user kept typing while we were asking.
+      if (_scratchpadController.text != before.text) return;
+      final String cleaned = (res['text'] as String?) ?? before.text;
+      _setPadText(
+        cleaned,
+        (res['caret'] as num?)?.toInt() ?? cleaned.length,
+      );
+      _pollBackendStatus();
+    } finally {
+      _padCleanBusy = false;
+    }
+  }
+
+  /// Called (inside setState) whenever the engine reports a newly applied fix.
+  void _celebrateFix(Map<String, dynamic> fix) {
+    final String original = '${fix['original'] ?? ''}';
+    final String replacement = '${fix['replacement'] ?? ''}';
+    if (replacement.isEmpty) return;
+    _toasts.add(_FixToastData(
+      id: _toastSeq++,
+      original: original,
+      replacement: replacement,
+      extraCount: (int.tryParse('${fix['count'] ?? '1'}') ?? 1) - 1,
+      color: _fixCategoryColor('${fix['category'] ?? ''}'),
+    ));
+    if (_toasts.length > 3) _toasts.removeAt(0);
+    _hopTicks = 9;
+    _idleTicksWithoutActivity = 0;
+    if (!_isListening) {
+      _localTrickState = 'fixing';
+      _trickTicksRemaining = 16;
+    }
+  }
+
+  void _toggleLiveClean() {
+    setState(() => _liveClean = !_liveClean);
+    _postBackend('/set_live_clean', {'enabled': _liveClean});
   }
 
   double get _petWidth => HighResPixelGenerator.kGridW * (_pixelScale * 0.52);
@@ -443,7 +551,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     if (!_isFloorExpanded) {
       return 52.0; // Compact flat floor bar + 18px grass/stone top
     }
-    return 295.0; // Expanded live transcription + interactive word explorer + Grammarly drawer
+    return 320.0; // Expanded live transcription + interactive word explorer + Grammarly drawer
   }
 
   void _setFloorExpanded(bool expanded) {
@@ -495,6 +603,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
       _animTick++;
       _idleTicksWithoutActivity++;
 
+      if (_hopTicks > 0) _hopTicks--;
       if (_trickTicksRemaining > 0) {
         _trickTicksRemaining--;
         if (_trickTicksRemaining == 0) {
@@ -525,13 +634,13 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
           _autonomousAction = 'sleep';
         } else if (_behaviorCounter > 65 && _autonomousAction == 'walk') {
           _autonomousAction =
-              (math.Random().nextInt(3) == 0) ? 'curious' : 'idle';
+              (_rng.nextInt(3) == 0) ? 'curious' : 'idle';
           _behaviorCounter = 0;
         } else if (_behaviorCounter > 42 &&
             (_autonomousAction == 'idle' || _autonomousAction == 'curious')) {
           _autonomousAction = 'walk';
           _behaviorCounter = 0;
-          if (math.Random().nextInt(3) == 0) {
+          if (_rng.nextInt(3) == 0) {
             _walkDirection = -_walkDirection;
           }
         }
@@ -573,11 +682,15 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     ];
 
     if (_showSpeechBubble || _isListening) {
+      // Use the floor's real rendered height so every button stays clickable
+      // however tall the expanded drawer currently is.
+      final double measured =
+          _floorKey.currentContext?.size?.height ?? (_currentFloorHeight + 18.0);
       rects.add([
         floorPos.dx - 8,
         floorPos.dy - 6,
         _floorWidth + 16,
-        _currentFloorHeight + 16,
+        measured + 14,
       ]);
     }
 
@@ -588,11 +701,20 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
 
     if (_showContextMenu) {
       final Offset menuPos = _computeMenuPosition(petW, petH);
-      rects.add([menuPos.dx - 8, menuPos.dy - 8, 348.0, 520.0]);
+      rects.add([menuPos.dx - 8, menuPos.dy - 8, 348.0, _menuHeight]);
     }
 
+    // The window only needs telling when a rect actually moved (plus a slow
+    // heartbeat), not 18 times a second.
+    final String signature = rects
+        .map((r) => r.map((v) => v.round()).join(','))
+        .join(';');
+    if (signature == _lastRectsSignature && _animTick % 18 != 0) return;
+    _lastRectsSignature = signature;
     _windowChannel.invokeMethod('setInteractiveRects', rects);
   }
+
+  static const double _menuHeight = 510.0;
 
   Offset _computeFloorPosition(double petH) {
     final double fy = _petY + petH - 8.0;
@@ -611,8 +733,8 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
       mx = math.max(12.0, _floorX - 344);
     }
     double my = _petY - 120;
-    if (screen.height > 0 && my + 520 > screen.height) {
-      my = screen.height - 525;
+    if (screen.height > 0 && my + _menuHeight > screen.height) {
+      my = screen.height - _menuHeight - 5;
     }
     my = math.max(12.0, my);
     return Offset(mx, my);
@@ -824,6 +946,9 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
         ((_cursorX - (_petX + petW / 2)) / 240.0).clamp(-1.0, 1.0);
     final double lookDy =
         ((_cursorY - (_petY + petH / 2)) / 200.0).clamp(-1.0, 1.0);
+    // Little hop whenever a fix lands.
+    final double hopOffset =
+        _hopTicks > 0 ? math.sin(math.pi * (1 - _hopTicks / 9.0)) * 8.0 : 0.0;
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -835,7 +960,11 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
             Positioned(
               left: padPos.dx,
               top: padPos.dy,
-              child: _buildScratchpadDrawer(accent),
+              child: PopIn(
+                key: const ValueKey('scratchpad'),
+                alignment: Alignment.bottomCenter,
+                child: _buildScratchpadDrawer(accent),
+              ),
             ),
 
           // 2. UNDER-CREATURE LIVING TERRAIN FLOOR BOX (Flat by default, expands on click!)
@@ -869,7 +998,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
           // 3. The Active 56x40 Pixel Creature Standing ON TOP of the Terrain Floor
           Positioned(
             left: _petX,
-            top: _petY,
+            top: _petY - hopOffset,
             child: Listener(
               onPointerDown: (PointerDownEvent event) {
                 _idleTicksWithoutActivity = 0;
@@ -920,27 +1049,68 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                   });
                   _syncInteractiveRects();
                 },
-                child: PixelCreatureWidget(
-                  creature: _activeCreature,
-                  animState: animState,
-                  tick: _animTick,
-                  flipHorizontal: _facingLeft,
-                  pixelScale: _pixelScale,
-                  audioLevel: _audioLevel,
-                  lookDx: lookDx,
-                  lookDy: lookDy,
-                  customSpritePath: _customSpritePath,
+                // Picked up: the creature lifts and tilts into the drag.
+                child: AnimatedRotation(
+                  turns: _isDragging ? (_facingLeft ? -0.012 : 0.012) : 0.0,
+                  duration: const Duration(milliseconds: 140),
+                  curve: Curves.easeOut,
+                  child: AnimatedScale(
+                    scale: _isDragging ? 1.06 : 1.0,
+                    duration: const Duration(milliseconds: 140),
+                    curve: Curves.easeOutBack,
+                    alignment: Alignment.bottomCenter,
+                    child: PixelCreatureWidget(
+                      creature: _activeCreature,
+                      animState: animState,
+                      tick: _animTick,
+                      flipHorizontal: _facingLeft,
+                      pixelScale: _pixelScale,
+                      audioLevel: _audioLevel,
+                      lookDx: lookDx,
+                      lookDy: lookDy,
+                      customSpritePath: _customSpritePath,
+                    ),
+                  ),
                 ),
               ),
             ),
           ),
+
+          // 3b. "✔ teh → the" toasts rising from the creature on every fix
+          for (int i = 0; i < _toasts.length; i++)
+            Positioned(
+              left: _petX + petW / 2 - 150,
+              width: 300,
+              top: _petY - 30 - 24.0 * (_toasts.length - 1 - i),
+              child: IgnorePointer(
+                child: Center(
+                  child: FixToast(
+                    key: ValueKey<int>(_toasts[i].id),
+                    original: _toasts[i].original,
+                    replacement: _toasts[i].replacement,
+                    extraCount: _toasts[i].extraCount,
+                    color: _toasts[i].color,
+                    onDone: () {
+                      final int id = _toasts[i].id;
+                      if (mounted) {
+                        setState(() => _toasts.removeWhere((t) => t.id == id));
+                      }
+                    },
+                  ),
+                ),
+              ),
+            ),
 
           // 4. Right-Click Retro Pixel Context Menu
           if (_showContextMenu)
             Positioned(
               left: menuPos.dx,
               top: menuPos.dy,
-              child: _buildPixelContextMenu(accent),
+              child: PopIn(
+                key: const ValueKey('menu'),
+                alignment: Alignment.centerLeft,
+                child: _buildPixelContextMenu(accent),
+              ),
             ),
         ],
       ),
@@ -949,7 +1119,11 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
 
   Widget _buildTerrainFloorPlatform(Color accent) {
     final Color borderCol = _isListening
-        ? const Color(0xFF00E676)
+        ? Color.lerp(
+            const Color(0xFF00C853),
+            const Color(0xFFB9F6CA),
+            0.5 + 0.5 * math.sin(_animTick * 0.32),
+          )!
         : (_isCultistCreature
             ? const Color(0xFFFFD54F)
             : const Color(0xFF43A047));
@@ -958,6 +1132,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
         : const Color(0xF60F1712);
 
     return SizedBox(
+      key: _floorKey,
       width: _floorWidth,
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -973,8 +1148,16 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
           ),
 
           // 2. Compact Flat Bar OR Expanded Live Dictation & Word-Choice Sanctuary
-          if (!_isFloorExpanded)
-            GestureDetector(
+          // The drawer slides open/closed instead of snapping.
+          AnimatedSize(
+            duration: const Duration(milliseconds: 210),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: !_isFloorExpanded
+                ? PopIn(
+            key: const ValueKey('floor-flat'),
+            alignment: Alignment.topCenter,
+            child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: () {
                 setState(() {
@@ -1006,6 +1189,20 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                             ? const Color(0xFF00E676)
                             : const Color(0xFFFF5252),
                       ),
+                      if (_liveClean)
+                        const Padding(
+                          padding: EdgeInsets.only(right: 4),
+                          child: Tooltip(
+                            message: 'Live Clean is ON: typos are fixed as you type',
+                            child: Text(
+                              '⚡',
+                              style: TextStyle(
+                                color: Color(0xFFFFEE18),
+                                fontSize: 9.5,
+                              ),
+                            ),
+                          ),
+                        ),
                       if (!_isReviewOnlyMode) ...[
                         _miniPixelButton(
                           label: _isListening ? '■ STOP' : '● REC',
@@ -1080,9 +1277,15 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                   ],
                 ),
               ),
-            )
-          else
-            _buildExpandedFloorBox(accent, borderCol, groundBg),
+            ),
+                  )
+                : PopIn(
+                    key: const ValueKey('floor-full'),
+                    alignment: Alignment.topCenter,
+                    duration: const Duration(milliseconds: 240),
+                    child: _buildExpandedFloorBox(accent, borderCol, groundBg),
+                  ),
+          ),
         ],
       ),
     );
@@ -1106,6 +1309,14 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
           activeWordExp = cand;
         }
       }
+      // Unsure spellings come first: they are the ones that need a decision.
+      activeWordExp ??= _wordExplorations.cast<Map<String, dynamic>?>().firstWhere(
+            (w) =>
+                w != null &&
+                w['kind'] == 'spelling' &&
+                ((w['alternatives'] as List?)?.isNotEmpty ?? false),
+            orElse: () => null,
+          );
       activeWordExp ??= _wordExplorations.cast<Map<String, dynamic>?>().firstWhere(
             (w) =>
                 w != null &&
@@ -1308,7 +1519,11 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
           // C. Live Pixel Audio Meter + Status Message
           Row(
             children: [
-              _buildPixelAudioMeter(),
+              PixelAudioMeter(
+                level: _audioLevel,
+                active: _isListening,
+                tick: _animTick,
+              ),
               const SizedBox(width: 7),
               Expanded(
                 child: Text(
@@ -1320,6 +1535,19 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                     fontSize: 10.0,
                   ),
                 ),
+              ),
+              const SizedBox(width: 6),
+              _miniPixelButton(
+                label: _liveClean ? '⚡ LIVE CLEAN: ON' : '⚡ LIVE CLEAN: OFF',
+                color: _liveClean
+                    ? const Color(0xFFFFEE18)
+                    : const Color(0xFF78909C),
+                active: _liveClean,
+                tooltip:
+                    'Fix typos in any app the moment you finish a word. '
+                    'Backspace right after a fix undoes it. '
+                    'Skips code editors, terminals & password managers.',
+                onTap: _toggleLiveClean,
               ),
             ],
           ),
@@ -1357,7 +1585,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                                 _rawLiveText.trim() !=
                                     _polishedLiveText.trim())
                               Text(
-                                '${_isReviewOnlyMode ? 'Original' : 'Heard'}: $_rawLiveText',
+                                '${_isListening ? 'Heard' : 'Before'}: $_rawLiveText',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
@@ -1415,19 +1643,30 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
               children: [
                 Row(
                   children: [
-                    Text(
-                      'GRAMMARLY SCORE: $_writingScore/100',
-                      style: const TextStyle(
-                        color: Color(0xFFFFEE18),
+                    CountingText(
+                      value: _writingScore,
+                      format: (int v) => 'GRAMMARLY SCORE: $v/100',
+                      style: TextStyle(
+                        color: PillarBars.colorFor(_writingScore),
                         fontSize: 9.5,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: 7),
                     Expanded(
+                      flex: 3,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: PillarBars(scores: _pillarScores),
+                      ),
+                    ),
+                    Flexible(
+                      flex: 2,
                       child: Text(
-                        'Tone: $_detectedTone • Corr ${_pillarScores['correctness'] ?? 100} • Clar ${_pillarScores['clarity'] ?? 100}',
+                        _detectedTone,
                         maxLines: 1,
+                        textAlign: TextAlign.right,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                           color: Color(0xFFCE93D8),
@@ -1435,21 +1674,41 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                         ),
                       ),
                     ),
-                    // 1-Click Full Sentence Rewrite Variant Buttons
-                    for (final variant in _sentenceVariants.take(2))
-                      Padding(
-                        padding: const EdgeInsets.only(left: 4),
-                        child: _miniPixelButton(
-                          label: '✨ ${variant['label']}',
-                          color: const Color(0xFF00E5FF),
-                          tooltip:
-                              '${variant['description']}: "${variant['text']}"',
-                          onTap: () =>
-                              _applyFullSentenceVariant(variant['text'] ?? ''),
-                        ),
-                      ),
                   ],
                 ),
+
+                // 1-Click Full Sentence Rewrites, with a preview of what you get
+                if (_sentenceVariants.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      for (final variant in _sentenceVariants.take(2))
+                        Padding(
+                          padding: const EdgeInsets.only(right: 4),
+                          child: _miniPixelButton(
+                            label: '✨ ${variant['label']}',
+                            color: const Color(0xFF00E5FF),
+                            tooltip:
+                                '${variant['description']}: "${variant['text']}"',
+                            onTap: () =>
+                                _applyFullSentenceVariant(variant['text'] ?? ''),
+                          ),
+                        ),
+                      Expanded(
+                        child: Text(
+                          '"${_sentenceVariants.first['text'] ?? ''}"',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Color(0xFF80DEEA),
+                            fontSize: 8.5,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
 
                 // Interactive Word-Choice Alternatives ("Did you mean?" / Synonyms / Drop Hedge)
                 if (activeWordExp != null) ...[
@@ -1459,7 +1718,9 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                     child: Row(
                       children: [
                         Text(
-                          activeWordExp['kind'] == 'confusable'
+                          activeWordExp['kind'] == 'spelling'
+                              ? '✎ DID YOU MEAN ("${activeWordExp['word']}")? '
+                              : activeWordExp['kind'] == 'confusable'
                               ? '🔍 SOUND-ALIKE "${activeWordExp['word']}": '
                               : (activeWordExp['kind'] == 'hedging'
                                   ? '✂ HEDGE "${activeWordExp['word']}": '
@@ -1495,6 +1756,17 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                             ),
                           );
                         }),
+                        if (activeWordExp['kind'] == 'spelling')
+                          _miniPixelButton(
+                            label: '✓ KEEP',
+                            color: const Color(0xFFB0BEC5),
+                            tooltip:
+                                '"${activeWordExp['word']}" is spelled right — learn it and never flag it again',
+                            onTap: () => _postBackend(
+                              '/learn_word',
+                              {'word': '${activeWordExp!['word']}'},
+                            ),
+                          ),
                       ],
                     ),
                   ),
@@ -1565,61 +1837,105 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
       );
     }
 
-    return Wrap(
-      spacing: 4,
-      runSpacing: 2,
-      children: List.generate(_wordExplorations.length, (i) {
-        final Map<String, dynamic> exp = _wordExplorations[i];
-        final String display = '${exp['display'] ?? exp['word'] ?? ''}';
-        final String kind = '${exp['kind'] ?? 'normal'}';
-        final List<dynamic> alts =
-            (exp['alternatives'] as List<dynamic>?) ?? const [];
-        final bool hasAlts = alts.isNotEmpty;
-        final bool isSelected = _selectedWordIndex == i;
+    // Words that were just auto-fixed glow green for a moment.
+    final Set<String> fixedWords = <String>{
+      for (final Map<String, String> f in _recentFixes)
+        ...(f['replacement'] ?? '')
+            .toLowerCase()
+            .split(RegExp(r"[^a-z']+"))
+            .where((String w) => w.length > 1),
+    };
 
-        Color underlineCol = Colors.transparent;
-        if (kind == 'confusable') {
-          underlineCol = const Color(0xFF00E5FF);
-        } else if (kind == 'hedging') {
-          underlineCol = const Color(0xFFFF8A80);
-        } else if (kind == 'upgrade') {
-          underlineCol = const Color(0xFFFFEE18);
-        }
+    return ConstrainedBox(
+      // Long documents scroll inside the box instead of stretching the HUD.
+      constraints: const BoxConstraints(maxHeight: 56),
+      child: SingleChildScrollView(
+        reverse: true,
+        child: Wrap(
+          spacing: 4,
+          runSpacing: 2,
+          children: List.generate(_wordExplorations.length, (i) {
+            final Map<String, dynamic> exp = _wordExplorations[i];
+            final String display = '${exp['display'] ?? exp['word'] ?? ''}';
+            final String kind = '${exp['kind'] ?? 'normal'}';
+            final List<dynamic> alts =
+                (exp['alternatives'] as List<dynamic>?) ?? const [];
+            final bool hasAlts = alts.isNotEmpty;
+            final bool isSelected = _selectedWordIndex == i;
+            final bool justFixed =
+                fixedWords.contains('${exp['word'] ?? ''}'.toLowerCase());
 
-        return GestureDetector(
-          onTap: hasAlts
-              ? () {
-                  setState(() {
-                    _selectedWordIndex = i;
-                  });
-                }
-              : null,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
-            decoration: BoxDecoration(
-              color: isSelected
-                  ? const Color(0xFF283593)
-                  : (hasAlts ? const Color(0xFF1E293B) : Colors.transparent),
-              border: Border(
-                bottom: BorderSide(
-                  color: underlineCol,
-                  width: hasAlts ? 2.0 : 0.0,
+            Color underlineCol = Colors.transparent;
+            if (kind == 'spelling') {
+              underlineCol = const Color(0xFFFF5252);
+            } else if (kind == 'confusable') {
+              underlineCol = const Color(0xFF00E5FF);
+            } else if (kind == 'hedging') {
+              underlineCol = const Color(0xFFFF8A80);
+            } else if (kind == 'upgrade') {
+              underlineCol = const Color(0xFFFFEE18);
+            } else if (justFixed) {
+              underlineCol = const Color(0x8869F0AE);
+            }
+
+            final Color restBg = isSelected
+                ? const Color(0xFF283593)
+                : (hasAlts ? const Color(0xFF1E293B) : const Color(0x00000000));
+
+            return MouseRegion(
+              cursor: hasAlts
+                  ? SystemMouseCursors.click
+                  : SystemMouseCursors.basic,
+              child: GestureDetector(
+                onTap: hasAlts
+                    ? () {
+                        setState(() {
+                          _selectedWordIndex = i;
+                        });
+                      }
+                    : null,
+                child: TweenAnimationBuilder<Color?>(
+                  // New key when the word at this spot changes, so a corrected
+                  // word flashes green and then settles.
+                  key: ValueKey<String>('$i|$display'),
+                  tween: ColorTween(
+                    begin: justFixed ? const Color(0xFF2E7D32) : restBg,
+                    end: restBg,
+                  ),
+                  duration: const Duration(milliseconds: 1100),
+                  curve: Curves.easeOut,
+                  builder: (BuildContext context, Color? bg, Widget? child) {
+                    return Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 2, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: bg,
+                        border: Border(
+                          bottom: BorderSide(
+                            color: underlineCol,
+                            width: (hasAlts || justFixed) ? 2.0 : 0.0,
+                          ),
+                        ),
+                      ),
+                      child: child,
+                    );
+                  },
+                  child: Text(
+                    display,
+                    style: TextStyle(
+                      color: hasAlts
+                          ? const Color(0xFFFFFFFF)
+                          : const Color(0xFFFFF59D),
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                 ),
               ),
-            ),
-            child: Text(
-              display,
-              style: TextStyle(
-                color: hasAlts
-                    ? const Color(0xFFFFFFFF)
-                    : const Color(0xFFFFF59D),
-                fontSize: 11.5,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-        );
-      }),
+            );
+          }),
+        ),
+      ),
     );
   }
 
@@ -1634,7 +1950,9 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     return Expanded(
       child: GestureDetector(
         onTap: () => _switchCreatureTier(creatureKey),
-        child: Container(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
           decoration: BoxDecoration(
             color: selected ? const Color(0xFF1F2D3D) : const Color(0xFF121822),
@@ -1671,34 +1989,6 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
           ),
         ),
       ),
-    );
-  }
-
-  Widget _buildPixelAudioMeter() {
-    const int totalBars = 10;
-    final int activeBars =
-        (_audioLevel * totalBars).round().clamp(0, totalBars);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: List.generate(totalBars, (i) {
-        final bool on = i < activeBars;
-        Color barCol = const Color(0xFF263238);
-        if (on) {
-          if (i >= 7) {
-            barCol = const Color(0xFFFF5252);
-          } else if (i >= 4) {
-            barCol = const Color(0xFFFFD740);
-          } else {
-            barCol = const Color(0xFF00E676);
-          }
-        }
-        return Container(
-          width: 4,
-          height: 11,
-          margin: const EdgeInsets.only(right: 2),
-          color: barCol,
-        );
-      }),
     );
   }
 
@@ -1739,7 +2029,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                       ),
                     ),
                     Text(
-                      'Words: $_totalWordsWritten • Auto-Fixes: $_totalFixesApplied • Score: $_writingScore/100',
+                      'Cleans as you type • Words: $_totalWordsWritten • Fixes: $_totalFixesApplied • Score: $_writingScore/100',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -1799,17 +2089,22 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
                 },
               ),
               _miniPixelButton(
-                label: 'CLEAR',
+                label: 'ERASE',
                 color: const Color(0xFFFF8A80),
-                tooltip: 'Clear scratchpad',
+                tooltip: 'Erase everything in the scratchpad',
                 onTap: () {
                   _scratchpadController.clear();
                   _lastSyncedSessionTranscript = '';
                   _postBackend('/clear_history', {});
                 },
               ),
+              const Text(
+                'TONE:',
+                style: TextStyle(color: Color(0xFF90A4AE), fontSize: 9),
+              ),
               for (final tone in ['clear', 'formal', 'casual'])
                 _miniPixelButton(
+                  active: _writingTone == tone,
                   label: tone.toUpperCase(),
                   color: _writingTone == tone
                       ? const Color(0xFF69F0AE)
@@ -1838,7 +2133,7 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
               ),
               decoration: const InputDecoration(
                 hintText:
-                    'Speak or type here... Words stream live and get auto-fixed for dyslexia, homophones & Grammarly clarity!',
+                    'Speak or type here... each word is cleaned up the moment you finish it (wrong, missing or swapped letters, homophones).',
                 hintStyle: TextStyle(color: Colors.white38, fontSize: 11),
                 filled: true,
                 fillColor: Color(0xFF141B29),
@@ -1862,27 +2157,14 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     required Color color,
     required String tooltip,
     required VoidCallback onTap,
+    bool active = false,
   }) {
-    return Tooltip(
-      message: tooltip,
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1D2432),
-            border: Border.all(color: color, width: 1.5),
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              color: color,
-              fontSize: 9.5,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-      ),
+    return PixelButton(
+      label: label,
+      color: color,
+      tooltip: tooltip,
+      onTap: onTap,
+      active: active,
     );
   }
 
@@ -2049,6 +2331,17 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
             label: 'Dyslexia Spelling & Phonetic Fixes',
           ),
           _ruleToggleTile(
+            ruleKey: 'smart_typos',
+            label: _smartTyposAvailable
+                ? 'Smart Typo Fixer (any wrong / missing letter)'
+                : 'Smart Typo Fixer (needs Windows spell checker)',
+          ),
+          _toggleTile(
+            enabled: _liveClean,
+            label: 'Live Clean: fix typos in any app as I type',
+            onTap: _toggleLiveClean,
+          ),
+          _ruleToggleTile(
             ruleKey: 'clarity_conciseness',
             label: 'Grammarly Clarity & Conciseness',
           ),
@@ -2157,7 +2450,9 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
   }) {
     return GestureDetector(
       onTap: () => _switchCreatureTier(keyId),
-      child: Container(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
         margin: const EdgeInsets.only(bottom: 3),
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
         decoration: BoxDecoration(
@@ -2194,7 +2489,9 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
     required String label,
   }) {
     final bool enabled = _grammarRules[ruleKey] ?? true;
-    return GestureDetector(
+    return _toggleTile(
+      enabled: enabled,
+      label: label,
       onTap: () {
         final Map<String, bool> updated = Map<String, bool>.from(_grammarRules);
         updated[ruleKey] = !enabled;
@@ -2203,47 +2500,81 @@ class _TransparentOverlayScreenState extends State<TransparentOverlayScreen> {
         });
         _postBackend('/update_rules', {'rules': updated});
       },
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2.0),
-        child: Row(
-          children: [
-            Container(
-              width: 13,
-              height: 13,
-              decoration: BoxDecoration(
-                color: enabled
-                    ? const Color(0xFF00E676)
-                    : const Color(0xFF263238),
-                border: Border.all(color: Colors.white70, width: 1),
-              ),
-              child: enabled
-                  ? const Center(
-                      child: Text(
-                        '✓',
-                        style: TextStyle(
-                          color: Colors.black,
-                          fontSize: 9,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    )
-                  : null,
-            ),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                label,
-                style: TextStyle(
+    );
+  }
+
+  Widget _toggleTile({
+    required bool enabled,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2.0),
+          child: Row(
+            children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                width: 13,
+                height: 13,
+                decoration: BoxDecoration(
                   color: enabled
-                      ? const Color(0xFFECEFF1)
-                      : const Color(0xFF78909C),
-                  fontSize: 10.0,
+                      ? const Color(0xFF00E676)
+                      : const Color(0xFF263238),
+                  border: Border.all(color: Colors.white70, width: 1),
+                ),
+                child: AnimatedScale(
+                  scale: enabled ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 150),
+                  curve: Curves.easeOutBack,
+                  child: const Center(
+                    child: Text(
+                      '✓',
+                      style: TextStyle(
+                        color: Colors.black,
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ],
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: enabled
+                        ? const Color(0xFFECEFF1)
+                        : const Color(0xFF78909C),
+                    fontSize: 10.0,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
+}
+
+class _FixToastData {
+  final int id;
+  final String original;
+  final String replacement;
+  final int extraCount;
+  final Color color;
+
+  const _FixToastData({
+    required this.id,
+    required this.original,
+    required this.replacement,
+    required this.extraCount,
+    required this.color,
+  });
 }

@@ -21,3 +21,6 @@ env/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Local user settings (personal dictionary, Live Clean preference)
+backend/user_settings.json

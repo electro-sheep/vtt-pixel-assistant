@@ -1,4 +1,4 @@
-# VTT Pixel Assistant v3.4 — 100% Local Voice Dictation, Pure Text Review (No-VTT), 4-Tier AI Progression & Grammarly Companion
+# VTT Pixel Assistant v3.5 — 100% Local Voice Dictation, Pure Text Review (No-VTT), 4-Tier AI Progression & Grammarly Companion
 
 ![VTT Pixel Assistant Showcase](docs/images/vtt_assistant_showcase.png)
 
@@ -46,7 +46,15 @@ Runs 100% locally in `< 1 ms` with zero cloud calls and zero extra VRAM:
 5. **Interactive 1-Click Helper Fixes (`POST /apply_recommendation`)**:
    - Click `[HELPER FIX]` on any recommendation card in the expanded floor box and your pixel helper immediately performs an in-place replacement both in the live preview and directly inside your external document!
 
-### 3. Atomic Point-A to Point-B External Window Typing (`windows/runner/flutter_window.cpp`)
+### 3. Smart Typo Fixer & Live Clean (`backend/typo_fixer.py`, `backend/live_cleaner.py`)
+- **Any wrong, missing, extra or swapped letter**: beyond the fixed spelling list, every typed word is checked with Windows' built-in spell checker (100% local) and candidates are re-ranked with a keyboard-aware edit distance, so `wron` → `wrong`, `lewtters` → `letters`, `gfo` → `go`, `Functinality` → `Functionality`.
+- **Only confident fixes are automatic**: when two words are equally likely (`cnt` → cut / cant / cent) the word is left alone, underlined red, and offered as click-to-pick choices with a `✓ KEEP` button that adds it to your personal dictionary (`backend/user_settings.json`).
+- **Clean as you go**:
+  - The Writing Studio scratchpad cleans each word the moment you finish it, without moving your caret or touching the word you are still typing.
+  - `⚡ LIVE CLEAN` (off by default, remembered once switched on) does the same in *any* app: a keyboard listener keeps the last few words in memory only and fixes a word when you press space or punctuation. **Backspace right after a fix undoes it** and stops that word being changed again. It never fires on Enter/Tab, and skips code editors, terminals and password managers.
+- Each fix pops a `✔ teh → the` toast over the creature and the corrected word flashes green in the live preview.
+
+### 4. Atomic Point-A to Point-B External Window Typing (`windows/runner/flutter_window.cpp`)
 - **Zero Focus Stealing (`WS_EX_NOACTIVATE`)**: Clicking the creature or HUD buttons never steals keyboard focus from Notepad, Word, VS Code, or your browser.
 - **WinUI 3 / Notepad Safe Atomic Sync (`TypeInPlace`)**: Uses mathematical edit coalescing in Python + native C++ `VK_BACK` mini-batches + `CF_UNICODETEXT` Clipboard `Ctrl+V` synchronization so what you see in the yellow live preview is transferred identically to your active page.
 
@@ -55,7 +63,7 @@ Runs 100% locally in `< 1 ms` with zero cloud calls and zero extra VRAM:
 ## 🚀 Quick Start
 
 ```powershell
-# 1. Run backend unit tests (14 tests)
+# 1. Run backend unit tests (24 tests)
 pytest tests/test_backend.py -v
 
 # 2. Run Flutter static analysis & widget tests
@@ -64,5 +72,5 @@ flutter test
 
 # 3. Build and launch the Windows desktop overlay
 flutter build windows
-.\start_assistant.bat
+.\run_assistant.bat
 ```
